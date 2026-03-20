@@ -5,16 +5,16 @@ import SceneKit
 /// Note: Most functionality is now handled by Model3DView's Coordinator
 class ShapeSelector {
     
-    /// Highlight selected shape
-    func highlight(_ shape: SelectedShape?, in view: SCNView) {
-        // Reset all highlights
+    /// Highlight selected shape and optionally a set of profile-matching shapes.
+    func highlight(_ shape: SelectedShape?, matching: [SelectedShape] = [], in view: SCNView) {
         view.scene?.rootNode.enumerateChildNodes { node, _ in
             node.geometry?.firstMaterial?.emission.contents = NSColor.clear
         }
-        
-        // Highlight selected
-        if let shape = shape, let node = shape.node {
-            node.geometry?.firstMaterial?.emission.contents = NSColor.red
+        if let node = shape?.node {
+            node.geometry?.firstMaterial?.emission.contents = NSColor.orange
+        }
+        for m in matching {
+            m.node?.geometry?.firstMaterial?.emission.contents = NSColor(red: 0.0, green: 0.7, blue: 1.0, alpha: 1.0)
         }
     }
 }

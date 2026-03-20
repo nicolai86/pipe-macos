@@ -149,6 +149,33 @@ struct SidePanelView: View {
                         }
                         .buttonStyle(.bordered)
                     }
+
+                    // Matching shapes section
+                    if !viewModel.matchingShapes.isEmpty {
+                        Divider()
+
+                        Text("\(viewModel.matchingShapes.count) matching stock\(viewModel.matchingShapes.count == 1 ? "" : "s")")
+                            .font(.headline)
+                            .foregroundColor(Color(red: 0, green: 0.7, blue: 1.0))
+
+                        ForEach(Array(viewModel.matchingShapes.enumerated()), id: \.offset) { idx, shape in
+                            if let stock = shape.stockInfo {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Match \(idx + 1)")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(Color(red: 0, green: 0.7, blue: 1.0))
+                                    Text(viewModel.stockSummaryText(for: stock))
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                }
+                                .padding(.vertical, 4)
+                                if idx < viewModel.matchingShapes.count - 1 {
+                                    Divider().opacity(0.4)
+                                }
+                            }
+                        }
+                    }
                 } else {
                     Text("Click a shape to inspect it.")
                         .font(.caption)
@@ -186,11 +213,15 @@ enum ViewMode: String, CaseIterable, Identifiable {
 class AppViewModel: ObservableObject {
     @Published var loadedModel: Model3D?
     @Published var selectedShape: SelectedShape?
+    @Published var matchingShapes: [SelectedShape] = []
     @Published var generatedGCode: String?
     @Published var viewMode: ViewMode = .solid
 
     var selectedShapeSummary: String? {
-        guard let stock = selectedShape?.stockInfo else { return nil }
+        selectedShape?.stockInfo.map { stockSummaryText(for: $0) }
+    }
+
+    func stockSummaryText(for stock: StockInfo) -> String {
         var lines: [String] = []
         if stock.profile == .round {
             lines.append("Stock: \(stock.profile.rawValue)")
@@ -211,6 +242,35 @@ class AppViewModel: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    // Called from the main thread (gesture recognizer callback) — no async dispatch needed.
+    func selectShape(_ shape: SelectedShape?) {
+        selectedShape = shape
+        guard let selected = shape, let stock = selected.stockInfo,
+              let all = loadedModel?.selectableShapes else {
+            matchingShapes = []
+            return
+        }
+        matchingShapes = all.filter { other in
+            other != selected && other.stockInfo.map { profileMatches(stock, $0) } == true
+        }
+    }
+
+    func profileMatches(_ a: StockInfo, _ b: StockInfo) -> Bool {
+        guard a.profile == b.profile else { return false }
+        let tol: CGFloat = 1.0
+        switch a.profile {
+        case .round:
+            return abs((a.od ?? 0) - (b.od ?? 0)) < tol
+        case .square, .rectangular:
+            let (aX, aY) = (a.odX ?? 0, a.odY ?? 0)
+            let (bX, bY) = (b.odX ?? 0, b.odY ?? 0)
+            return (abs(aX - bX) < tol && abs(aY - bY) < tol) ||
+                   (abs(aX - bY) < tol && abs(aY - bX) < tol)
+        case .unknown:
+            return false
+        }
+    }
+
     func loadModel(from url: URL) {
         // Start accessing security-scoped resource
         guard url.startAccessingSecurityScopedResource() else {
@@ -226,6 +286,7 @@ class AppViewModel: ObservableObject {
             DispatchQueue.main.async {
                 // Reset UI state before loading new model
                 self.selectedShape = nil
+                self.matchingShapes = []
                 self.generatedGCode = nil
                 self.loadedModel = model
             }
@@ -236,12 +297,6 @@ class AppViewModel: ObservableObject {
     
     func openFile() {
         NotificationCenter.default.post(name: .openModel, object: nil)
-    }
-    
-    func selectShape(_ shape: SelectedShape?) {
-        DispatchQueue.main.async {
-            self.selectedShape = shape
-        }
     }
     
     /// Generates G-code for a selected shape

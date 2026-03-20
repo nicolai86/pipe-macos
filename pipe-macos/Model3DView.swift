@@ -148,19 +148,17 @@ class Coordinator: NSObject {
     
     @objc func handleTap(_ gestureRecognize: NSGestureRecognizer) {
         guard let scnView = scnView, let viewModel = viewModel else { return }
-        
+
         let p = gestureRecognize.location(in: scnView)
         let hitResults = scnView.hitTest(p, options: [:])
-        
-        if let result = hitResults.first(where: { $0.node.name?.hasPrefix("model_") == true }) {
-            if let selected = viewModel.loadedModel?.selectableShapes.first(where: { $0.node === result.node }) {
-                viewModel.selectedShape = selected
-                let selector = ShapeSelector()
-                selector.highlight(selected, in: scnView)
-            }
+        let selector = ShapeSelector()
+
+        if let result = hitResults.first(where: { $0.node.name?.hasPrefix("model_") == true }),
+           let selected = viewModel.loadedModel?.selectableShapes.first(where: { $0.node === result.node }) {
+            viewModel.selectShape(selected)
+            selector.highlight(selected, matching: viewModel.matchingShapes, in: scnView)
         } else {
-            viewModel.selectedShape = nil
-            let selector = ShapeSelector()
+            viewModel.selectShape(nil)
             selector.highlight(nil, in: scnView)
         }
     }
