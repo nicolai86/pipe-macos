@@ -164,15 +164,22 @@
                 TopLoc_Location loc;
                 Handle(Geom_Surface) surf = BRep_Tool::Surface(face, loc);
                 if (!surf.IsNull()) {
+                    // BRep_Tool::Surface returns geometry in LOCAL (pre-placement) space.
+                    // loc contains the cumulative transformation to world space.
+                    // We must apply it so that normals/axes are consistent with the
+                    // tessellation vertices (which already have loc applied via p.Transform()).
+                    const gp_Trsf& trsf = loc.IsIdentity() ? gp_Trsf() : loc.Transformation();
                     if (surf->IsKind(STANDARD_TYPE(Geom_CylindricalSurface))) {
                         surfaceType = 1;
                         Handle(Geom_CylindricalSurface) cyl = Handle(Geom_CylindricalSurface)::DownCast(surf);
                         gp_Cylinder cylinder = cyl->Cylinder();
+                        cylinder.Transform(trsf);
                         cylData = [[CylinderSurfaceData alloc] initWithRadius:cylinder.Radius() locationX:cylinder.Location().X() locationY:cylinder.Location().Y() locationZ:cylinder.Location().Z() axisX:cylinder.Axis().Direction().X() axisY:cylinder.Axis().Direction().Y() axisZ:cylinder.Axis().Direction().Z()];
                     } else if (surf->IsKind(STANDARD_TYPE(Geom_Plane))) {
                         surfaceType = 0;
                         Handle(Geom_Plane) pln = Handle(Geom_Plane)::DownCast(surf);
                         gp_Pln plane = pln->Pln();
+                        plane.Transform(trsf);
                         planeData = [[PlaneSurfaceData alloc] initWithLocationX:plane.Location().X() locationY:plane.Location().Y() locationZ:plane.Location().Z() normalX:plane.Axis().Direction().X() normalY:plane.Axis().Direction().Y() normalZ:plane.Axis().Direction().Z()];
                     }
                 }

@@ -36,7 +36,7 @@
             faceDict[@"surface_type"] = [self surfaceTypeToString:face.surfaceType];
             
             if (face.cylinderData) {
-                faceDict[@"cylinder"] = @{ @"radius": @(face.cylinderData.radius), @"axisX": @(face.cylinderData.axisX), @"axisY": @(face.cylinderData.axisY), @"axisZ": @(face.cylinderData.axisZ) };
+                faceDict[@"cylinder"] = @{ @"radius": @(face.cylinderData.radius), @"locationX": @(face.cylinderData.locationX), @"locationY": @(face.cylinderData.locationY), @"locationZ": @(face.cylinderData.locationZ), @"axisX": @(face.cylinderData.axisX), @"axisY": @(face.cylinderData.axisY), @"axisZ": @(face.cylinderData.axisZ) };
             }
             if (face.planeData) {
                 faceDict[@"plane"] = @{
