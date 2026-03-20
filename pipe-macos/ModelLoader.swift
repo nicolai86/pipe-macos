@@ -447,7 +447,12 @@ class ModelLoader {
                     }
                 }
             }
-            if currentLoop.count >= 4 { loops.append(currentLoop) }
+            // Accept only geometrically closed loops: end must return to start within the
+            // same stitching tolerance used to join edges. This is scale- and sampling-invariant —
+            // it works regardless of how many sample points OCCT places on each edge.
+            if distance(currentLoop.first!, currentLoop.last!) < stitchTolerance {
+                loops.append(currentLoop)
+            }
         }
 
         // Map 3D loops to 2D (axial position, angular position) and classify as features.

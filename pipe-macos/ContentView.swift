@@ -107,13 +107,10 @@ struct ToolbarView: View {
                 Text("Solid").tag(ViewMode.solid)
             }
             .pickerStyle(.segmented)
-            .frame(width: 200)
+            .labelsHidden()
+            .frame(width: 160)
 
             Spacer()
-
-            Toggle("Selection Mode", isOn: $viewModel.selectionMode)
-                .toggleStyle(.switch)
-                .help("Enable sub-shape selection")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
@@ -124,67 +121,48 @@ struct ToolbarView: View {
 
 struct SidePanelView: View {
     @ObservedObject var viewModel: AppViewModel
-    
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Model Info")
                     .font(.headline)
-                
+
                 Divider()
-                
-                Text("Selected Shape")
-                    .font(.headline)
-                
+
                 if let selection = viewModel.selectedShape {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ShapeInfoView(shape: selection)
-                        
-                        if let shapeData = selection.shapeData, shapeData.isCuttable {
-                            Button("Generate GCode (Selected Shape)") {
-                                viewModel.generateGCode(for: selection)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            
-                            Button("Deselect") {
-                                viewModel.selectShape(nil)
-                            }
-                            .buttonStyle(.bordered)
-                        }
+                    if let summary = viewModel.selectedShapeSummary {
+                        Text(summary)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .font(.caption)
+
+                    if let shapeData = selection.shapeData, shapeData.isCuttable {
+                        Button("Generate GCode") {
+                            viewModel.generateGCode(for: selection)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Deselect") {
+                            viewModel.selectShape(nil)
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 } else {
-                    Text("No shape selected")
+                    Text("Click a shape to inspect it.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                
-                // Show button to generate G-code for any selectable shape if available
-                if let shapes = viewModel.loadedModel?.selectableShapes, !shapes.isEmpty,
-                   viewModel.selectedShape == nil {
-                    Divider()
-                    
-                    Text("Available Shapes")
-                        .font(.headline)
-                    
-                    ForEach(shapes) { shape in
-                        if let shapeData = shape.shapeData, shapeData.isCuttable {
-                            Button("Generate GCode for \(shapeData.type.rawValue)") {
-                                viewModel.generateGCode(for: shape)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                }
-                
+
                 Spacer()
-                
+
                 if let gcode = viewModel.generatedGCode {
                     Divider()
-                    
+
                     Text("GCode Preview")
                         .font(.headline)
-                    
+
                     TextEditor(text: .constant(gcode))
                         .font(.system(.caption, design: .monospaced))
                         .frame(height: 200)
@@ -197,46 +175,6 @@ struct SidePanelView: View {
     }
 }
 
-struct ShapeInfoView: View {
-    let shape: SelectedShape
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let shapeData = shape.shapeData {
-                Text("Type: \(shapeData.type.rawValue)")
-                
-                dimensionText(for: shapeData)
-                
-                Text("Cuttable: \(shapeData.isCuttable ? "Yes" : "No")")
-                    .foregroundColor(shapeData.isCuttable ? .green : .red)
-            } else {
-                Text("No shape data available")
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private func dimensionText(for shapeData: ShapeData) -> some View {
-        switch shapeData.type {
-        case .cylinder:
-            if let anyCodable = shapeData.dimensions,
-               let dims = anyCodable.value as? CylinderDimensions {
-                Text("Diameter: \(String(format: "%.2f", dims.diameter)) mm")
-                Text("Height: \(String(format: "%.2f", dims.height)) mm")
-            }
-        case .box:
-            if let anyCodable = shapeData.dimensions,
-               let dims = anyCodable.value as? BoxDimensions {
-                Text("Width: \(String(format: "%.2f", dims.width)) mm")
-                Text("Height: \(String(format: "%.2f", dims.height)) mm")
-                Text("Depth: \(String(format: "%.2f", dims.depth)) mm")
-            }
-        case .custom:
-            EmptyView()
-        }
-    }
-}
 
 // MARK: - View Mode
 enum ViewMode: String, CaseIterable, Identifiable {
@@ -250,8 +188,29 @@ class AppViewModel: ObservableObject {
     @Published var selectedShape: SelectedShape?
     @Published var generatedGCode: String?
     @Published var viewMode: ViewMode = .solid
-    @Published var selectionMode: Bool = false
-    
+
+    var selectedShapeSummary: String? {
+        guard let stock = selectedShape?.stockInfo else { return nil }
+        var lines: [String] = []
+        if stock.profile == .round {
+            lines.append("Stock: \(stock.profile.rawValue)")
+            lines.append("OD: \(String(format: "%.1f", stock.od ?? 0)) mm")
+        } else {
+            lines.append("Stock: \(stock.profile.rawValue)")
+            lines.append("OD: \(String(format: "%.1f", stock.odX ?? 0)) × \(String(format: "%.1f", stock.odY ?? 0)) mm")
+        }
+        lines.append("Length: \(String(format: "%.1f", stock.length)) mm")
+        if stock.features.isEmpty {
+            lines.append("Features: none detected")
+        } else {
+            lines.append("Features: \(stock.features.count) detected")
+            for f in stock.features {
+                lines.append("  • \(f.type.rawValue.capitalized)  X=\(String(format: "%.1f", f.xCenter)) mm  A=\(String(format: "%.0f", f.aCenterDeg))°")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     func loadModel(from url: URL) {
         // Start accessing security-scoped resource
         guard url.startAccessingSecurityScopedResource() else {
