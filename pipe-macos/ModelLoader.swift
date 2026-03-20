@@ -227,8 +227,11 @@ class ModelLoader {
         // For a square/rect tube cross(sideWall1, sideWall2) == tubeAxis.
         // Score each candidate pair by (combined vertex weight) × (alignment with PCA).
         // Weight ensures large outer-wall pairs beat small cut-face pairs.
-        // PCA alignment resolves the ± sign ambiguity and ranks quality — it is never a hard gate,
-        // so a PCA that is 30-40° off (due to asymmetric cuts) still selects the correct axis.
+        // PCA alignment resolves the ± sign ambiguity and ranks quality.
+        // Hard gate of 0.95 (≈ 18°): cope/miter cut faces introduce ±X and ±Z plane normals
+        // whose cross-product gives a global axis (X or Z) with alignment ~0.42–0.91 against PCA.
+        // Requiring > 0.95 lets only true side-wall pairs (alignment ≈ 1.0) override PCA;
+        // everything else leaves tubeAxis = pcaAxis, which is more reliable for these cases.
         var bestScore: Float = 0.0
         for i in 0..<normalClusters.count {
             for j in (i + 1)..<normalClusters.count {
@@ -236,6 +239,7 @@ class ModelLoader {
                 guard abs(dot(n1, n2)) < 0.15 else { continue }  // must be perpendicular
                 let candidate = normalize(cross(n1, n2))
                 let alignment = abs(dot(candidate, pcaAxis))  // always score against immutable PCA
+                guard alignment > 0.95 else { continue }       // reject candidates >~18° from PCA
                 let score = Float(normalClusters[i].weight + normalClusters[j].weight) * alignment
                 if score > bestScore {
                     bestScore = score
@@ -247,15 +251,20 @@ class ModelLoader {
 
         // --- Step 4: Refine with cylinder axis for round tubes ---
         // The main outer cylindrical surface's axis IS the tube axis — more precise than PCA.
+        // Also track the largest cylinder radius: round tubes have a large outer cylinder
+        // (r > 5 mm); rectangular tubes only have small corner-radius cylinders (r ≈ 2–4 mm).
         var maxCylVertices = 0
+        var maxCylRadius: Float = 0
         for f in facesData {
             guard let type = f["surface_type"] as? String, type == "CYLINDER",
                   let cd = f["cylinder"] as? [String: Any] else { continue }
             let axis = normalize(SIMD3<Float>(getFloat(cd, "axisX"), getFloat(cd, "axisY"), getFloat(cd, "axisZ")))
             let vCount = (f["vertices"] as? [[String: Any]])?.count ?? 0
+            let r = getFloat(cd, "radius")
             // Only accept if aligned with current tubeAxis (avoids picking axis of a drilled hole)
             if abs(dot(axis, tubeAxis)) > 0.9 && vCount > maxCylVertices {
                 maxCylVertices = vCount
+                maxCylRadius = r
                 tubeAxis = axis
             }
         }
@@ -273,6 +282,10 @@ class ModelLoader {
         let uAxis: SIMD3<Float>
         if let dominant = sideWallsWithPartners.first {
             uAxis = dominant.dir
+        } else if let sideWall = sideWallCandidates.first {
+            // One pair of side walls (e.g. ±XZ) removed by cope/miter cuts; use the remaining
+            // wall normal directly — cross(tubeAxis, …) gives the complementary axis.
+            uAxis = sideWall.dir
         } else {
             // Fallback for round tubes or unknown profiles
             let arb: SIMD3<Float> = abs(tubeAxis.x) > 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(1, 0, 0)
@@ -303,8 +316,12 @@ class ModelLoader {
         let trueCrossMax = max(trueWidth, trueHeight)
         let trueCrossMin = min(trueWidth, trueHeight)
 
-        // Rectangular profile confirmed by finding two perpendicular side-wall normal clusters.
-        let isRectangular = sideWallsWithPartners.count >= 2
+        // Round tubes have a large outer cylinder (r > 5 mm); rectangular HSS has only small
+        // corner-radius cylinders (r ≈ 2–4 mm).  Using the cylinder radius is more reliable
+        // than counting perpendicular side-wall pairs, which can be zero when cope cuts remove
+        // one pair of side walls entirely.
+        let isRound = maxCylRadius > 5.0
+        let isRectangular = !isRound && !sideWallCandidates.isEmpty
         let profile: StockProfile = isRectangular
             ? (abs(trueCrossMax - trueCrossMin) < 2.0 ? .square : .rectangular)
             : .round
