@@ -265,6 +265,9 @@ class AppViewModel: ObservableObject {
         
         if let model = ModelLoader.loadSTEP(url: url) {
             DispatchQueue.main.async {
+                // Reset UI state before loading new model
+                self.selectedShape = nil
+                self.generatedGCode = nil
                 self.loadedModel = model
             }
         } else {

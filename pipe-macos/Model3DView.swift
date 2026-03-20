@@ -35,20 +35,41 @@ struct SceneKitView: NSViewRepresentable {
     }
     
     func updateNSView(_ scnView: SCNView, context: Context) {
-        // Update nodes safely
-        if scnView.scene?.rootNode.childNodes.contains(where: { $0.name?.hasPrefix("model_") == true }) == false {
+        // Track if we have a model in the view model
+        let hasModelInViewModel = viewModel.loadedModel != nil
+        
+        // If view model has a model but it's a different model, reset the scene
+        if hasModelInViewModel && !context.coordinator.isCurrentModel(viewModel.loadedModel) {
+            // Remove all old model nodes
+            scnView.scene?.rootNode.enumerateChildNodes { node, _ in
+                if node.name?.hasPrefix("model_") == true {
+                    node.removeFromParentNode()
+                }
+            }
+            
+            // Clear any highlighting
+            let selector = ShapeSelector()
+            selector.highlight(nil, in: scnView)
+            
+            // Add new model nodes (they're already centered at 0,0,0 by ModelLoader)
             if let root = viewModel.loadedModel?.rootNode {
                 for child in root.childNodes {
                     scnView.scene?.rootNode.addChildNode(child)
                 }
-                
-                // Auto-frame camera to encompass the new model
-                scnView.scene?.rootNode.enumerateChildNodes { node, _ in
-                    if node.name?.hasPrefix("model_") == true {
-                        scnView.pointOfView?.look(at: node.position)
-                    }
+            }
+            
+            // Reset camera to default position looking at origin (0,0,0)
+            // Only reset if this is the first model OR user requested a reset
+            if context.coordinator.currentModelURL == nil {
+                if let cameraNode = scnView.pointOfView {
+                    cameraNode.position = SCNVector3(x: 200, y: 200, z: 500)
+                    cameraNode.look(at: SCNVector3(0, 0, 0))
                 }
             }
+            // For subsequent models, keep the camera where the user positioned it
+            
+            // Update the coordinator's tracking
+            context.coordinator.currentModelURL = viewModel.loadedModel?.url
         }
         
         // Handle view mode changes
@@ -119,6 +140,11 @@ struct SceneKitView: NSViewRepresentable {
 class Coordinator: NSObject {
     var scnView: SCNView?
     var viewModel: AppViewModel?
+    var currentModelURL: URL?
+    
+    func isCurrentModel(_ model: Model3D?) -> Bool {
+        return currentModelURL == model?.url
+    }
     
     @objc func handleTap(_ gestureRecognize: NSGestureRecognizer) {
         guard let scnView = scnView, let viewModel = viewModel else { return }

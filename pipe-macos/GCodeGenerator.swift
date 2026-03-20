@@ -167,7 +167,7 @@ class GCodeGenerator {
         
         var header = [
             "%",
-            "O0001 (PROGRAM NAME: cylinder)",
+            "(PROGRAM NAME: cylinder)",
             "(GENERATED: \(formatter.string(from: Date())))",
             "(STOCK: \(stock.profile.rawValue))"
         ]

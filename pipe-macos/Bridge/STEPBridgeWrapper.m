@@ -21,6 +21,14 @@
         solidDict[@"solidId"] = @(solid.solidId);
         solidDict[@"boundingBox"] = @{ @"xMin": @(solid.xMin), @"yMin": @(solid.yMin), @"zMin": @(solid.zMin), @"xMax": @(solid.xMax), @"yMax": @(solid.yMax), @"zMax": @(solid.zMax) };
         
+        // --- ADD PCA EXPORT TO JSON ---
+        solidDict[@"pca"] = @{
+            @"centerX": @(solid.pcaCenterX), @"centerY": @(solid.pcaCenterY), @"centerZ": @(solid.pcaCenterZ),
+            @"axis1X": @(solid.pcaAxis1X), @"axis1Y": @(solid.pcaAxis1Y), @"axis1Z": @(solid.pcaAxis1Z),
+            @"axis2X": @(solid.pcaAxis2X), @"axis2Y": @(solid.pcaAxis2Y), @"axis2Z": @(solid.pcaAxis2Z),
+            @"axis3X": @(solid.pcaAxis3X), @"axis3Y": @(solid.pcaAxis3Y), @"axis3Z": @(solid.pcaAxis3Z)
+        };
+        
         NSMutableArray *facesJSON = [NSMutableArray array];
         for (FaceData *face in solid.faces) {
             NSMutableDictionary *faceDict = [NSMutableDictionary dictionary];
@@ -31,7 +39,6 @@
                 faceDict[@"cylinder"] = @{ @"radius": @(face.cylinderData.radius), @"axisX": @(face.cylinderData.axisX), @"axisY": @(face.cylinderData.axisY), @"axisZ": @(face.cylinderData.axisZ) };
             }
             if (face.planeData) {
-                // FIX: Exposed Locations so Swift can compute distance from center
                 faceDict[@"plane"] = @{
                     @"normalX": @(face.planeData.normalX), @"normalY": @(face.planeData.normalY), @"normalZ": @(face.planeData.normalZ),
                     @"locationX": @(face.planeData.locationX), @"locationY": @(face.planeData.locationY), @"locationZ": @(face.planeData.locationZ)

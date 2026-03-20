@@ -93,10 +93,28 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) double yMax;
 @property (nonatomic, assign) double zMax;
 
+// PCA Orientation Data
+@property (nonatomic, assign) double pcaCenterX;
+@property (nonatomic, assign) double pcaCenterY;
+@property (nonatomic, assign) double pcaCenterZ;
+@property (nonatomic, assign) double pcaAxis1X;
+@property (nonatomic, assign) double pcaAxis1Y;
+@property (nonatomic, assign) double pcaAxis1Z;
+@property (nonatomic, assign) double pcaAxis2X;
+@property (nonatomic, assign) double pcaAxis2Y;
+@property (nonatomic, assign) double pcaAxis2Z;
+@property (nonatomic, assign) double pcaAxis3X; // Min inertia -> Longitudinal Extrusion Axis
+@property (nonatomic, assign) double pcaAxis3Y;
+@property (nonatomic, assign) double pcaAxis3Z;
+
 - (instancetype)initWithSolidId:(int)solidId
                           faces:(NSArray<FaceData *> *)faces
                            xMin:(double)xMin yMin:(double)yMin zMin:(double)zMin
-                           xMax:(double)xMax yMax:(double)yMax zMax:(double)zMax;
+                           xMax:(double)xMax yMax:(double)yMax zMax:(double)zMax
+                           pcaCX:(double)pcaCX pcaCY:(double)pcaCY pcaCZ:(double)pcaCZ
+                           ax1X:(double)ax1X ax1Y:(double)ax1Y ax1Z:(double)ax1Z
+                           ax2X:(double)ax2X ax2Y:(double)ax2Y ax2Z:(double)ax2Z
+                           ax3X:(double)ax3X ax3Y:(double)ax3Y ax3Z:(double)ax3Z;
 
 @end
 
@@ -118,7 +136,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// @param url File URL of the STEP file
 /// @param error Error pointer
 /// @return Parse result with solids and faces
-+ (nullable STEPParseResult *)parseSTEPFile:(NSURL *)url 
++ (nullable STEPParseResult *)parseSTEPFile:(NSURL *)url
                                       error:(NSError * _Nullable __autoreleasing * _Nullable)error;
 
 @end

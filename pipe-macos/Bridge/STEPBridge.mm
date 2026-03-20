@@ -27,6 +27,9 @@
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <Poly_Triangulation.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <GProp_PrincipalProps.hxx>
 
 @implementation CylinderSurfaceData
 - (instancetype)initWithRadius:(double)radius locationX:(float)locationX locationY:(float)locationY locationZ:(float)locationZ axisX:(float)axisX axisY:(float)axisY axisZ:(float)axisZ {
@@ -72,9 +75,13 @@
 @end
 
 @implementation SolidData
-- (instancetype)initWithSolidId:(int)solidId faces:(NSArray<FaceData *> *)faces xMin:(double)xMin yMin:(double)yMin zMin:(double)zMin xMax:(double)xMax yMax:(double)yMax zMax:(double)zMax {
+- (instancetype)initWithSolidId:(int)solidId faces:(NSArray<FaceData *> *)faces xMin:(double)xMin yMin:(double)yMin zMin:(double)zMin xMax:(double)xMax yMax:(double)yMax zMax:(double)zMax pcaCX:(double)pcaCX pcaCY:(double)pcaCY pcaCZ:(double)pcaCZ ax1X:(double)ax1X ax1Y:(double)ax1Y ax1Z:(double)ax1Z ax2X:(double)ax2X ax2Y:(double)ax2Y ax2Z:(double)ax2Z ax3X:(double)ax3X ax3Y:(double)ax3Y ax3Z:(double)ax3Z {
     if (self = [super init]) {
         _solidId = solidId; _faces = faces; _xMin = xMin; _yMin = yMin; _zMin = zMin; _xMax = xMax; _yMax = yMax; _zMax = zMax;
+        _pcaCenterX = pcaCX; _pcaCenterY = pcaCY; _pcaCenterZ = pcaCZ;
+        _pcaAxis1X = ax1X; _pcaAxis1Y = ax1Y; _pcaAxis1Z = ax1Z;
+        _pcaAxis2X = ax2X; _pcaAxis2Y = ax2Y; _pcaAxis2Z = ax2Z;
+        _pcaAxis3X = ax3X; _pcaAxis3Y = ax3Y; _pcaAxis3Z = ax3Z;
     }
     return self;
 }
@@ -102,7 +109,6 @@
         reader.TransferRoots();
         TopoDS_Shape shape = reader.OneShape();
         
-        // Force meshing so Swift has visual triangles to render
         BRepMesh_IncrementalMesh mesher(shape, 0.1);
         
         NSMutableArray *solids = [NSMutableArray array];
@@ -111,6 +117,31 @@
         TopExp_Explorer solidExp(shape, TopAbs_SOLID);
         while (solidExp.More()) {
             TopoDS_Solid solid = TopoDS::Solid(solidExp.Current());
+            
+            // --- PCA TENSOR COMPUTATION ---
+            double pcaCX = 0, pcaCY = 0, pcaCZ = 0;
+            double ax1X = 1, ax1Y = 0, ax1Z = 0;
+            double ax2X = 0, ax2Y = 1, ax2Z = 0;
+            double ax3X = 0, ax3Y = 0, ax3Z = 1;
+            
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(solid, props);
+            if (props.Mass() < 1e-6) { BRepGProp::SurfaceProperties(solid, props); }
+            
+            if (props.Mass() >= 1e-6) {
+                gp_Pnt center = props.CentreOfMass();
+                pcaCX = center.X(); pcaCY = center.Y(); pcaCZ = center.Z();
+                
+                GProp_PrincipalProps pProps = props.PrincipalProperties();
+                gp_Dir a1 = pProps.FirstAxisOfInertia();
+                gp_Dir a2 = pProps.SecondAxisOfInertia();
+                gp_Dir a3 = pProps.ThirdAxisOfInertia(); // Extrusion axis is min inertia
+                
+                ax1X = a1.X(); ax1Y = a1.Y(); ax1Z = a1.Z();
+                ax2X = a2.X(); ax2Y = a2.Y(); ax2Z = a2.Z();
+                ax3X = a3.X(); ax3Y = a3.Y(); ax3Z = a3.Z();
+            }
+            // ------------------------------
             
             TopTools_IndexedMapOfShape faceMap;
             TopExp::MapShapes(solid, TopAbs_FACE, faceMap);
@@ -192,7 +223,6 @@
                     wireExp.Next();
                 }
                 
-                // === FIXED: Extract the visual Triangles for Swift to Render ===
                 NSMutableArray *verts = [NSMutableArray array];
                 NSMutableArray *idxs = [NSMutableArray array];
                 
@@ -206,7 +236,6 @@
                     for (int i = 1; i <= triangulation->NbTriangles(); ++i) {
                         int n1, n2, n3;
                         triangulation->Triangle(i).Get(n1, n2, n3);
-                        // OCCT 1-based indexing to Swift 0-based indexing
                         [idxs addObject:@[@(n1 - 1), @(n2 - 1), @(n3 - 1)]];
                     }
                 }
@@ -219,7 +248,7 @@
             double xmin, ymin, zmin, xmax, ymax, zmax;
             bbox.Get(xmin, ymin, zmin, xmax, ymax, zmax);
             
-            [solids addObject:[[SolidData alloc] initWithSolidId:solidId faces:facesArray xMin:xmin yMin:ymin zMin:zmin xMax:xmax yMax:ymax zMax:zmax]];
+            [solids addObject:[[SolidData alloc] initWithSolidId:solidId faces:facesArray xMin:xmin yMin:ymin zMin:zmin xMax:xmax yMax:ymax zMax:zmax pcaCX:pcaCX pcaCY:pcaCY pcaCZ:pcaCZ ax1X:ax1X ax1Y:ax1Y ax1Z:ax1Z ax2X:ax2X ax2Y:ax2Y ax2Z:ax2Z ax3X:ax3X ax3Y:ax3Y ax3Z:ax3Z]];
             solidId++;
             solidExp.Next();
         }
