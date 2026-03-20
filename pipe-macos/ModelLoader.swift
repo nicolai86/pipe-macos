@@ -98,6 +98,7 @@ struct AnyCodable: Codable {
     }
 }
 
+
 // MARK: - Bulletproof JSON Extractors
 fileprivate func getFloat(_ dict: [String: Any]?, _ key: String) -> Float {
     guard let dict = dict else { return 0.0 }
@@ -365,22 +366,26 @@ class ModelLoader {
                     }
                 } else if type == "CYLINDER", let cyl = face["cylinder"] as? [String: Any] {
                     let cAxis = normalize(SIMD3<Float>(getFloat(cyl, "axisX"), getFloat(cyl, "axisY"), getFloat(cyl, "axisZ")))
-                    guard abs(dot(cAxis, tubeAxis)) > 0.9 else { continue }
+                    let axisAlign = abs(dot(cAxis, tubeAxis))
+                    guard axisAlign > 0.9 else { continue }
                     let cLoc = SIMD3<Float>(getFloat(cyl, "locationX"), getFloat(cyl, "locationY"), getFloat(cyl, "locationZ"))
                     let radius = getFloat(cyl, "radius")
                     let u  = abs(dot(cLoc - center, uAxis))
                     let vv = abs(dot(cLoc - center, vAxis))
-                    // Use true cross-section half-widths (rotation-invariant) rather than global extrema.
-                    // maxPosU/minNegU are origin-based projections and diverge when the tube is placed
-                    // far from the world origin or rotated — only (maxPosU - minNegU)/2 is stable.
+                    // Use true cross-section half-widths (rotation-invariant).
                     let halfU = (maxPosU - minNegU) / 2.0
                     let halfV = (maxPosV - minNegV) / 2.0
-                    if u + radius >= halfU - extremumTol || vv + radius >= halfV - extremumTol {
+                    // Tight cylinder tolerance: outer corner cylinders touch the outer wall exactly
+                    // (vv+r == halfV by geometry), while inner corners are wall-thickness away.
+                    // 0.5mm covers mesh/float errors but stays below minimum real wall (~1mm).
+                    let cylTol: Float = 0.5
+                    if u + radius >= halfU - cylTol || vv + radius >= halfV - cylTol {
                         outerWallFaceIDs.insert(faceID)
                     }
                 }
             }
         }
+
 
 
         // AAG edge traversal: collect feature boundary edges from outer hull faces.
@@ -442,7 +447,7 @@ class ModelLoader {
                     }
                 }
             }
-            if currentLoop.count > 5 { loops.append(currentLoop) }
+            if currentLoop.count >= 4 { loops.append(currentLoop) }
         }
 
         // Map 3D loops to 2D (axial position, angular position) and classify as features.
