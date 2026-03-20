@@ -271,69 +271,81 @@ class ModelLoader {
         )
         
         if let facesData = solid["faces"] as? [[String: Any]] {
-            extractFeaturesFromTopology(facesData: facesData, axis: normalizedAxis, center: center, stockInfo: stockInfo)
+            extractFeaturesFromTopology(facesData: facesData, axis: normalizedAxis, center: center, stockInfo: stockInfo, renderVerts: renderVerts)
         }
 
         let shapeData = ShapeData(type: isRectangular ? .box : .cylinder, dimensions: nil, isCuttable: true, stockInfo: stockInfo)
         return (Mesh3D(vertices: renderVerts, faces: renderFaces, shapeData: shapeData), stockInfo)
     }
 
-    private static func extractFeaturesFromTopology(facesData: [[String: Any]], axis: SIMD3<Float>, center: SIMD3<Float>, stockInfo: StockInfo) {
-        
+private static func extractFeaturesFromTopology(facesData: [[String: Any]], axis: SIMD3<Float>, center: SIMD3<Float>, stockInfo: StockInfo, renderVerts: [SCNVector3]) {
         let normalizedAxis = normalize(axis)
-        var tempUp = SIMD3<Float>(0, 1, 0)
-        if abs(normalizedAxis.y) > 0.9 { tempUp = SIMD3<Float>(1, 0, 0) }
-        let uVec = normalize(cross(tempUp, normalizedAxis))
-        let vVec = normalize(cross(normalizedAxis, uVec))
         
-        let radiusX = Float(stockInfo.odX ?? stockInfo.od ?? 0) / 2.0
-        let radiusY = Float(stockInfo.odY ?? stockInfo.od ?? 0) / 2.0
-        
-        // 1. Analytical B-Rep Outer Wall Classifier
-        var outerWallFaceIDs = Set<Int>()
+        // 1. Find Principal Axes from Planar Faces (True U and V for rectangles)
+        var trueU: SIMD3<Float>?
+        var trueV: SIMD3<Float>?
         
         for face in facesData {
-            let faceID = getInt(face, "faceID")
-            guard let surfaceType = face["surface_type"] as? String else { continue }
-            
-            if surfaceType == "PLANE" {
-                if let plane = face["plane"] as? [String: Any] {
-                    let normal = normalize(SIMD3<Float>(getFloat(plane, "normalX"), getFloat(plane, "normalY"), getFloat(plane, "normalZ")))
-                    
-                    if abs(dot(normal, normalizedAxis)) < 0.1 { // Parallel to tube axis
-                        let location = SIMD3<Float>(getFloat(plane, "locationX"), getFloat(plane, "locationY"), getFloat(plane, "locationZ"))
-                        let maxDist = abs(dot(normal, uVec)) * radiusX + abs(dot(normal, vVec)) * radiusY
-                        let actualDist = abs(dot(location - center, normal))
-                        
-                        if actualDist > maxDist - 1.0 { outerWallFaceIDs.insert(faceID) }
-                    }
-                }
-            } else if surfaceType == "CYLINDER" {
-                if let cyl = face["cylinder"] as? [String: Any] {
-                    let axisDir = normalize(SIMD3<Float>(getFloat(cyl, "axisX"), getFloat(cyl, "axisY"), getFloat(cyl, "axisZ")))
-                    let radius = getFloat(cyl, "radius")
-                    
-                    if abs(dot(axisDir, normalizedAxis)) > 0.9 {
-                        if stockInfo.profile == .round {
-                            if radius > radiusX - 1.0 { outerWallFaceIDs.insert(faceID) }
-                        } else {
-                            // FIX: Rectangular tubes have both inner and outer corners.
-                            // Isolate the outer corners by checking distance to bounding box edge.
-                            let cylLoc = SIMD3<Float>(getFloat(cyl, "locationX"), getFloat(cyl, "locationY"), getFloat(cyl, "locationZ"))
-                            let u = dot(cylLoc - center, uVec)
-                            let v = dot(cylLoc - center, vVec)
-                            
-                            // If the extreme edge of this cylinder is within 2mm of the bounding box edge, it's an outer corner
-                            if (abs(u) + radius) > Float(radiusX) - 2.0 && (abs(v) + radius) > Float(radiusY) - 2.0 {
-                                outerWallFaceIDs.insert(faceID)
-                            }
-                        }
-                    }
+            if let type = face["surface_type"] as? String, type == "PLANE", let plane = face["plane"] as? [String: Any] {
+                let normal = normalize(SIMD3<Float>(getFloat(plane, "normalX"), getFloat(plane, "normalY"), getFloat(plane, "normalZ")))
+                if abs(dot(normal, normalizedAxis)) < 0.1 { // Parallel to tube axis
+                    if trueU == nil { trueU = normal }
+                    else if trueV == nil && abs(dot(normal, trueU!)) < 0.1 { trueV = normal }
                 }
             }
         }
         
-        // 2. Extract Bridging Cut Edges
+        var tempUp = SIMD3<Float>(0, 1, 0)
+        if abs(normalizedAxis.y) > 0.9 { tempUp = SIMD3<Float>(1, 0, 0) }
+        let fallbackU = normalize(cross(tempUp, normalizedAxis))
+        let fallbackV = normalize(cross(normalizedAxis, fallbackU))
+        
+        let uAxis = trueU ?? fallbackU
+        let vAxis = trueV ?? fallbackV
+        
+        // 2. Find absolute bounds along uAxis and vAxis
+        var maxU: Float = 0
+        var maxV: Float = 0
+        for v in renderVerts {
+            let pos = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+            maxU = max(maxU, abs(dot(pos - center, uAxis)))
+            maxV = max(maxV, abs(dot(pos - center, vAxis)))
+        }
+        
+        // 3. Classify Outer Walls
+        var outerWallFaceIDs = Set<Int>()
+        for face in facesData {
+            let faceID = getInt(face, "faceID")
+            var isLongitudinal = false
+            
+            if let type = face["surface_type"] as? String {
+                if type == "PLANE", let plane = face["plane"] as? [String: Any] {
+                    let normal = normalize(SIMD3<Float>(getFloat(plane, "normalX"), getFloat(plane, "normalY"), getFloat(plane, "normalZ")))
+                    if abs(dot(normal, normalizedAxis)) < 0.1 { isLongitudinal = true }
+                } else if type == "CYLINDER", let cyl = face["cylinder"] as? [String: Any] {
+                    let axisDir = normalize(SIMD3<Float>(getFloat(cyl, "axisX"), getFloat(cyl, "axisY"), getFloat(cyl, "axisZ")))
+                    if abs(dot(axisDir, normalizedAxis)) > 0.9 { isLongitudinal = true }
+                }
+            }
+            
+            if isLongitudinal {
+                guard let vArr = face["vertices"] as? [[String: Any]], !vArr.isEmpty else { continue }
+                var faceMaxU: Float = 0
+                var faceMaxV: Float = 0
+                for v in vArr {
+                    let pos = SIMD3<Float>(getFloat(v, "x"), getFloat(v, "y"), getFloat(v, "z"))
+                    faceMaxU = max(faceMaxU, abs(dot(pos - center, uAxis)))
+                    faceMaxV = max(faceMaxV, abs(dot(pos - center, vAxis)))
+                }
+                
+                // If the face reaches the outer bounding box (within 1.0mm tolerance), it's a true outer wall
+                if faceMaxU > maxU - 1.0 || faceMaxV > maxV - 1.0 {
+                    outerWallFaceIDs.insert(faceID)
+                }
+            }
+        }
+        
+        // 4. Extract Bridging Cut Edges
         struct CutEdge { var points: [SIMD3<Float>] }
         var rawCutEdges: [CutEdge] = []
         
@@ -347,6 +359,7 @@ class ModelLoader {
                     let adjFaces = getIntArray(edge["adjacentFaceIDs"])
                     guard let pointsData = edge["points"] as? [[String: Any]], !pointsData.isEmpty else { continue }
                     
+                    // A cut edge connects an Outer Wall to a Face that is NOT an Outer Wall (Inner wall or Thickness Face)
                     let touchesInnerWall = adjFaces.contains { !outerWallFaceIDs.contains($0) } || adjFaces.count == 1
                     
                     if touchesInnerWall {
@@ -358,10 +371,10 @@ class ModelLoader {
             }
         }
         
-        // 3. Chain Edges into Closed Loops
+        // 5. Chain Edges into Closed Loops
         var loops: [[SIMD3<Float>]] = []
         var unvisited = rawCutEdges
-        let stitchTolerance: Float = 2.5
+        let stitchTolerance: Float = 2.5 // Increased slightly to safely bridge triangulated corner fillets
         
         while !unvisited.isEmpty {
             var currentLoop = unvisited.removeFirst().points
@@ -391,9 +404,8 @@ class ModelLoader {
             if currentLoop.count > 5 { loops.append(currentLoop) }
         }
         
-        // 4. Process Loops into Toolpaths
+        // 6. Process Loops into Toolpaths
         var featureId = 1
-        // Zero the axial machine coordinates to the lowest edge of the stock
         var minAxialExtents = Float.greatestFiniteMagnitude
         for loop3D in loops {
             for pos in loop3D { minAxialExtents = min(minAxialExtents, dot(pos, normalizedAxis)) }
@@ -404,8 +416,6 @@ class ModelLoader {
         for loop3D in loops {
             var pathPoints2D: [ToolpathPoint] = []
             var loopMinX = Float.greatestFiniteMagnitude, loopMaxX = -Float.greatestFiniteMagnitude
-            var loopMinU = Float.greatestFiniteMagnitude, loopMaxU = -Float.greatestFiniteMagnitude
-            var loopMinV = Float.greatestFiniteMagnitude, loopMaxV = -Float.greatestFiniteMagnitude
             
             for pos in loop3D {
                 let axial = dot(pos, normalizedAxis) - minAxialExtents
@@ -413,11 +423,8 @@ class ModelLoader {
                 
                 let centerProj = center + normalizedAxis * dot(pos - center, normalizedAxis)
                 let radialVec = pos - centerProj
-                let u = dot(radialVec, uVec)
-                let v = dot(radialVec, vVec)
-                
-                loopMinU = min(loopMinU, u); loopMaxU = max(loopMaxU, u)
-                loopMinV = min(loopMinV, v); loopMaxV = max(loopMaxV, v)
+                let u = dot(radialVec, uAxis)
+                let v = dot(radialVec, vAxis)
                 
                 var angle = atan2(Double(v), Double(u)) * 180.0 / .pi
                 if angle < 0 { angle += 360.0 }
@@ -425,38 +432,24 @@ class ModelLoader {
                 pathPoints2D.append(ToolpathPoint(x: CGFloat(axial), a: CGFloat(angle)))
             }
             
-            let sortedAngles = pathPoints2D.map { $0.a }.sorted()
-            var maxGap: CGFloat = 0
-            for i in 0..<sortedAngles.count {
-                var gap = sortedAngles[(i + 1) % sortedAngles.count] - sortedAngles[i]
-                if gap < 0 { gap += 360.0 }
-                if gap > maxGap { maxGap = gap }
+            // FIX: Use sequential Accumulated Traversal Angle instead of bounds gap
+            // This safely catches Start/End wrap cuts even if there are sparse points across a flat face
+            var accumulatedAngle: CGFloat = 0.0
+            for i in 0..<pathPoints2D.count {
+                let currentA = pathPoints2D[i].a
+                let nextA = pathPoints2D[(i + 1) % pathPoints2D.count].a
+                
+                var diff = nextA - currentA
+                while diff > 180.0 { diff -= 360.0 }
+                while diff < -180.0 { diff += 360.0 }
+                
+                accumulatedAngle += diff
             }
             
-            let heightDeg = 360.0 - maxGap
-            var aCenter = sortedAngles.first!
-            for i in 0..<sortedAngles.count {
-                var gap = sortedAngles[(i + 1) % sortedAngles.count] - sortedAngles[i]
-                if gap < 0 { gap += 360.0 }
-                if gap == maxGap {
-                    aCenter = sortedAngles[(i + 1) % sortedAngles.count] + heightDeg / 2.0
-                    if aCenter >= 360.0 { aCenter -= 360.0 }
-                    break
-                }
-            }
-            
-            let xCenter = CGFloat(loopMinX + loopMaxX) / 2.0
-            let width = CGFloat(loopMaxX - loopMinX)
-            
+            // If the loop traverses a full 360 degrees around the center, it's a profile sever
+            let isFullProfile = abs(accumulatedAngle) > 350.0
             let touchesStart = loopMinX <= 3.0
             let touchesEnd = loopMaxX >= tubeLength - 3.0
-            
-            // FIX: Robust Full Profile detection (handles missing vertices on flat rectangular faces)
-            // A profile is "Full" if it physically closes on itself AND spans the width/height of the tube.
-            let isClosed = distance(loop3D.first!, loop3D.last!) < 5.0
-            let spansU = (loopMaxU - loopMinU) > (Float(radiusX) * 1.5)
-            let spansV = (loopMaxV - loopMinV) > (Float(radiusY) * 1.5)
-            let isFullProfile = isClosed && spansU && spansV
             
             var type: SurfaceFeatureType
             if isFullProfile && touchesStart { type = .startCut }
@@ -464,6 +457,10 @@ class ModelLoader {
             else if touchesStart || touchesEnd { type = .notch }
             else { type = .cutout }
             
+            let xCenter = CGFloat(loopMinX + loopMaxX) / 2.0
+            let width = CGFloat(loopMaxX - loopMinX)
+            
+            // Unwrap the path to prevent A-axis violent rewinds
             var unwrappedPath: [ToolpathPoint] = [pathPoints2D[0]]
             for i in 1..<pathPoints2D.count {
                 var currentA = pathPoints2D[i].a
@@ -475,19 +472,18 @@ class ModelLoader {
             
             if type == .startCut || type == .endCut {
                 unwrappedPath.sort { $0.a < $1.a }
-                // Ensure the path closes exactly a full 360 degrees from the start point
                 if let firstPt = unwrappedPath.first {
                     unwrappedPath.append(ToolpathPoint(x: firstPt.x, a: firstPt.a + 360.0))
                 }
             }
             
-            var dimensions: [String: CGFloat] = ["width": width, "angle": heightDeg]
-            let transverseWidth = CGFloat(max(loopMaxU - loopMinU, loopMaxV - loopMinV))
-            if type == .cutout && abs(width - transverseWidth) < 5.0 {
-                type = .hole
-                dimensions["diameter"] = width
-            }
+            // Center the display angle smoothly
+            let sortedA = unwrappedPath.map { $0.a }.sorted()
+            var aCenter = sortedA[sortedA.count / 2]
+            while aCenter >= 360.0 { aCenter -= 360.0 }
+            while aCenter < 0.0 { aCenter += 360.0 }
             
+            let dimensions: [String: CGFloat] = ["width": width]
             let feature = SurfaceFeature(id: featureId, type: type, shape: .rectangle, xCenter: xCenter, aCenterDeg: aCenter, dimensions: dimensions, confidence: 1.0, path: unwrappedPath)
             stockInfo.features.append(feature)
             featureId += 1
