@@ -143,7 +143,7 @@ struct SceneKitView: NSViewRepresentable {
         weak var viewModel: AppViewModel?
         var selectionMode: Bool = false
         var shapeDataMap: [String: ShapeData] = [:]
-        var selectedNodeName: String?
+        var selectedNodeNames: [String] = []
         var currentViewMode: ViewMode?
         var modelHash: Int?
 
@@ -355,44 +355,200 @@ struct SceneKitView: NSViewRepresentable {
         }
         
         @objc func handleTap(_ gesture: NSClickGestureRecognizer) {
-            guard selectionMode,
-                  let scnView = scnView,
-                  let viewModel = viewModel else { return }
+                guard selectionMode,
+                      let scnView = scnView,
+                      let viewModel = viewModel else { return }
 
-            let location = gesture.location(in: scnView)
+                let location = gesture.location(in: scnView)
 
-            // Perform hit test
-            let hitResults = scnView.hitTest(location, options: [
-                SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue,
-                SCNHitTestOption.boundingBoxOnly: false
-            ])
+                let hitResults = scnView.hitTest(location, options: [
+                    SCNHitTestOption.searchMode: SCNHitTestSearchMode.all.rawValue,
+                    SCNHitTestOption.boundingBoxOnly: false
+                ])
 
-            // Find the mesh node that has shape data (traverse up the node hierarchy)
-            for hit in hitResults {
-                var currentNode: SCNNode? = hit.node
-                while currentNode != nil {
-                    if let nodeName = currentNode?.name,
-                       let shapeData = shapeDataMap[nodeName] {
-                        print("Selected: \(nodeName), type: \(shapeData.type.rawValue)")
-                        
-                        let selectedShape = SelectedShape(
-                            shapeType: shapeData.type.rawValue,
-                            dimensions: shapeData.dimensions,
-                            isCuttable: shapeData.isCuttable,
-                            node: currentNode
-                        )
-                        viewModel.selectShape(selectedShape)
+                for hit in hitResults {
+                    var currentNode: SCNNode? = hit.node
+                    while currentNode != nil {
+                        if let nodeName = currentNode?.name,
+                           let targetShapeData = shapeDataMap[nodeName] {
+                            
+                            print("Selected: \(nodeName), type: \(targetShapeData.type.rawValue)")
+                            if let stockInfo = targetShapeData.stockInfo {
+                                print("  Target StockInfo: profile=\(stockInfo.profile), od=\(stockInfo.od ?? 0), odX=\(stockInfo.odX ?? 0), odY=\(stockInfo.odY ?? 0)")
+                            }
+                            
+                            var matchingNodes: [SCNNode] = []
+                            var matchingNames: [String] = []
+                            
+                            print("Comparing against all meshes in scene:")
+                            // Find all identical stock profiles in the scene
+                            scnView.scene?.rootNode.enumerateChildNodes { (node, _) in
+                                if let name = node.name, let siblingShapeData = shapeDataMap[name] {
+                                    print("  Checking \(name):")
+                                    let matches = isSameStockProfile(targetShapeData, siblingShapeData)
+                                    if matches {
+                                        matchingNodes.append(node)
+                                        matchingNames.append(name)
+                                    }
+                                }
+                            }
+                            
+                            // Update ViewModel with the PRIMARY clicked node for specific GCode generation
+                            let selectedShape = SelectedShape(
+                                shapeType: targetShapeData.type.rawValue,
+                                dimensions: targetShapeData.dimensions,
+                                isCuttable: targetShapeData.isCuttable,
+                                node: currentNode,
+                                stockInfo: targetShapeData.stockInfo
+                            )
+                            viewModel.selectShape(selectedShape)
 
-                        // Highlight selected node
-                        highlightNode(currentNode!)
-                        return
+                            // Highlight all matching nodes
+                            highlightGroup(nodes: matchingNodes, names: matchingNames)
+                            
+                            print("Highlighted \(matchingNodes.count) \(matchingNames.joined(separator: ", ")) identical stock parts")
+                            return
+                        }
+                        currentNode = currentNode?.parent
                     }
-                    currentNode = currentNode?.parent
                 }
+                
+                print("No shape data found for hit")
+                viewModel.selectShape(nil)
+                clearHighlights()
             }
             
-            print("No shape data found for hit")
-        }
+            /// Compares two ShapeData profiles, ignoring length to match identical raw stock
+            private func isSameStockProfile(_ a: ShapeData, _ b: ShapeData) -> Bool {
+                // 1. Primary Check: Use the pristine StockInfo if it exists
+                if let stockA = a.stockInfo, let stockB = b.stockInfo {
+                    // Allow square and rectangular to match (both are box profiles)
+                    let profilesCompatible = stockA.profile == stockB.profile || 
+                                            (stockA.profile == .square && stockB.profile == .rectangular) ||
+                                            (stockA.profile == .rectangular && stockB.profile == .square)
+                    
+                    guard profilesCompatible else { 
+                        print("  Profile mismatch: \(stockA.profile) != \(stockB.profile)")
+                        return false 
+                    }
+                    
+                    // 4.0mm tolerance (~0.15"). Absorbs 3D miter tessellation noise
+                    // while safely keeping standard imperial/metric sizes separated.
+                    let tolerance: CGFloat = 4.0
+                    
+                    switch stockA.profile {
+                    case .round:
+                        let odA = stockA.od ?? 0
+                        let odB = stockB.od ?? 0
+                        let match = abs(odA - odB) < tolerance
+                        print("  Round comparison: OD_A=\(odA), OD_B=\(odB), diff=\(abs(odA - odB)), match=\(match)")
+                        return match
+                        
+                    case .square, .rectangular:
+                        let odXA = stockA.odX ?? 0
+                        let odYA = stockA.odY ?? 0
+                        let odXB = stockB.odX ?? 0
+                        let odYB = stockB.odY ?? 0
+                        
+                        print("  Rect/Square comparison: A=(\(odXA), \(odYA)), B=(\(odXB), \(odYB))")
+                        
+                        // Handle zero dimensions (invalid data)
+                        guard odXA > 0 && odYA > 0 && odXB > 0 && odYB > 0 else {
+                            print("    Zero dimension detected, no match")
+                            return false
+                        }
+                        
+                        // Sort to ignore orientation (standing up vs laying flat)
+                        let minA = min(odXA, odYA)
+                        let maxA = max(odXA, odYA)
+                        let minB = min(odXB, odYB)
+                        let maxB = max(odXB, odYB)
+                        
+                        let minDiff = abs(minA - minB)
+                        let maxDiff = abs(maxA - maxB)
+                        let match = minDiff < tolerance && maxDiff < tolerance
+                        
+                        print("    Sorted: A=[\(minA), \(maxA)], B=[\(minB), \(maxB)]")
+                        print("    Differences: min=\(minDiff), max=\(maxDiff), tolerance=\(tolerance)")
+                        print("    Match: \(match)")
+                        
+                        return match
+                        
+                    case .unknown:
+                        print("  Unknown profile type")
+                        return false
+                    }
+                }
+                
+                // 2. Fallback: Use basic ShapeData dimensions if StockInfo is somehow missing
+                print("  No StockInfo found, using fallback ShapeData comparison")
+                guard a.type == b.type else { 
+                    print("    Shape type mismatch: \(a.type) != \(b.type)")
+                    return false 
+                }
+                
+                let tolerance: CGFloat = 4.0
+                
+                switch a.type {
+                case .cylinder:
+                    if let dA = a.dimensions as? CylinderDimensions,
+                       let dB = b.dimensions as? CylinderDimensions {
+                        let match = abs(dA.diameter - dB.diameter) < tolerance
+                        print("    Cylinder: dia_A=\(dA.diameter), dia_B=\(dB.diameter), match=\(match)")
+                        return match
+                    }
+                case .box:
+                    if let dA = a.dimensions as? BoxDimensions,
+                       let dB = b.dimensions as? BoxDimensions {
+                        print("    Box: A=(\(dA.width), \(dA.height)), B=(\(dB.width), \(dB.height))")
+                        
+                        let minA = min(dA.width, dA.height)
+                        let maxA = max(dA.width, dA.height)
+                        let minB = min(dB.width, dB.height)
+                        let maxB = max(dB.width, dB.height)
+                        
+                        let match = abs(minA - minB) < tolerance && abs(maxA - maxB) < tolerance
+                        print("      Sorted: A=[\(minA), \(maxA)], B=[\(minB), \(maxB)], match=\(match)")
+                        return match
+                    }
+                case .custom:
+                    print("    Custom shape, no match")
+                    return false
+                }
+                
+                print("    Fallback failed")
+                return false
+            }
+            func highlightGroup(nodes: [SCNNode], names: [String]) {
+                clearHighlights()
+
+                // Apply red highlight to all identical parts
+                for node in nodes {
+                    node.geometry?.firstMaterial?.emission.contents = NSColor.red
+                    node.geometry?.firstMaterial?.diffuse.contents = NSColor.red
+                }
+
+                selectedNodeNames = names
+            }
+            
+            func clearHighlights() {
+                scnView?.scene?.rootNode.enumerateChildNodes { (n, _) in
+                    if n.name != nil && n.name!.hasPrefix("model_") {
+                        n.geometry?.firstMaterial?.emission.contents = NSColor.systemBlue.withAlphaComponent(0.4)
+                        n.geometry?.firstMaterial?.diffuse.contents = NSColor.systemBlue
+                    }
+                }
+                selectedNodeNames.removeAll()
+            }
+            
+            func reapplyHighlight(in scnView: SCNView) {
+                for name in selectedNodeNames {
+                    if let node = scnView.scene?.rootNode.childNode(withName: name, recursively: true) {
+                        node.geometry?.firstMaterial?.emission.contents = NSColor.red
+                        node.geometry?.firstMaterial?.diffuse.contents = NSColor.red
+                    }
+                }
+            }
 
         func highlightNode(_ node: SCNNode) {
             // Reset all materials to default blue
@@ -408,17 +564,9 @@ struct SceneKitView: NSViewRepresentable {
             node.geometry?.firstMaterial?.diffuse.contents = NSColor.red
 
             // Store reference to selected node by name
-            selectedNodeName = node.name
+            selectedNodeNames = [node.name!]
         }
         
-        func reapplyHighlight(in scnView: SCNView) {
-            guard let name = selectedNodeName,
-                  let node = scnView.scene?.rootNode.childNode(withName: name, recursively: true) else {
-                return
-            }
-            node.geometry?.firstMaterial?.emission.contents = NSColor.red
-            node.geometry?.firstMaterial?.diffuse.contents = NSColor.red
-        }
         
         func updateViewMode(in scnView: SCNView, viewMode: ViewMode) {
             scnView.scene?.rootNode.enumerateChildNodes { (node, _) in

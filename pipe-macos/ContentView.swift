@@ -354,16 +354,16 @@ class AppViewModel: ObservableObject {
                 // A sub-component is selected!
                 // Build a specific stock profile mapped to this part's world position
                 if let localStock = ModelLoader.classifyNode(node, baseStock: globalStock) {
-                    generatedGCode = generator.generate(for: shape, stockInfo: localStock)
+                    generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
                 } else {
-                    generatedGCode = generator.generate(for: shape, stockInfo: nil)
+                    generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
                 }
             } else {
                 // Nothing selected, generate the full global stock
-                generatedGCode = generator.generate(for: shape, stockInfo: globalStock)
+                generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
             }
         } else {
-            generatedGCode = generator.generate(for: shape, stockInfo: nil)
+            generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
         }
         
         // Post notification to save

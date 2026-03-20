@@ -55,14 +55,16 @@ class SelectedShape: Identifiable {
     var dimensions: Any?
     var isCuttable: Bool
     weak var node: SCNNode?
+    var stockInfo: StockInfo?
     
     init(id: UUID = UUID(), shapeType: String, dimensions: Any? = nil, 
-         isCuttable: Bool = true, node: SCNNode? = nil) {
+         isCuttable: Bool = true, node: SCNNode? = nil, stockInfo: StockInfo? = nil) {
         self.id = id
         self.shapeType = shapeType
         self.dimensions = dimensions
         self.isCuttable = isCuttable
         self.node = node
+        self.stockInfo = stockInfo
     }
 }
 
@@ -293,6 +295,7 @@ struct ShapeData {
     var type: ShapeType
     var dimensions: Any?
     var isCuttable: Bool
+    var stockInfo: StockInfo?
 }
 
 /// Complete 3D model with stock classification
@@ -436,6 +439,227 @@ class ModelLoader {
         detectEndCuts(vertices: physicalVertices, axis: localAxis, stockInfo: localStock)
         
         return localStock
+    }
+    
+    /// Computes the true physical cross-section of a prismatic part by projecting its vertices
+        /// onto its dominant planar normals, making it immune to rotation and miters.
+    private static func computeTrueCrossSection(vertices: [SCNVector3], normals: [SCNVector3]) -> (width: CGFloat, height: CGFloat)? {
+        // First, determine the length axis by finding the longest dimension
+        var minBounds = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxBounds = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        
+        for v in vertices {
+            let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+            minBounds = SIMD3<Float>(min(minBounds.x, p.x), min(minBounds.y, p.y), min(minBounds.z, p.z))
+            maxBounds = SIMD3<Float>(max(maxBounds.x, p.x), max(maxBounds.y, p.y), max(maxBounds.z, p.z))
+        }
+        
+        let size = maxBounds - minBounds
+        let maxDim = max(size.x, max(size.y, size.z))
+        
+        print("      Bounding box size: (\(size.x), \(size.y), \(size.z))")
+        
+        // First pass: collect ALL normals to find the TRUE tube axis
+        var normalCounts: [SIMD3<Float>: Int] = [:]
+        
+        for vNormal in normals {
+            // Convert to Float to avoid CGFloat/Double architecture differences
+            let nx = Float(vNormal.x)
+            let ny = Float(vNormal.y)
+            let nz = Float(vNormal.z)
+            
+            // Round to 1 decimal place to group slightly divergent normals from tessellation
+            var rx = round(nx * 10) / 10
+            var ry = round(ny * 10) / 10
+            var rz = round(nz * 10) / 10
+            
+            // Normalize the rounded vector
+            let len = sqrt(rx*rx + ry*ry + rz*rz)
+            guard len > 0.1 else { continue }
+            rx /= len
+            ry /= len
+            rz /= len
+            
+            var axis = SIMD3<Float>(rx, ry, rz)
+            
+            // Force vector to point in a positive half-space (+X and -X define the same axis)
+            if axis.x < 0 || (axis.x == 0 && axis.y < 0) || (axis.x == 0 && axis.y == 0 && axis.z < 0) {
+                axis = -axis
+            }
+            
+            // Re-round after normalization to ensure strict grouping
+            axis.x = round(axis.x * 10) / 10
+            axis.y = round(axis.y * 10) / 10
+            axis.z = round(axis.z * 10) / 10
+            
+            normalCounts[axis, default: 0] += 1
+        }
+        
+        // Find the TRUE tube axis by looking for 4 perpendicular normals (the side walls)
+        // For a rectangular tube, there should be 4 normals that are all perpendicular to the same axis
+        let allNormals = normalCounts.map { (axis: $0.key, count: $0.value) }.sorted { $0.count > $1.count }
+        
+        print("      Total distinct normals: \(allNormals.count)")
+        if allNormals.count <= 8 {
+            for (i, normal) in allNormals.enumerated() {
+                print("        [\(i)] axis=(\(normal.axis.x), \(normal.axis.y), \(normal.axis.z)), count=\(normal.count)")
+            }
+        }
+        
+        // Strategy: Find the axis that is perpendicular to the 4 most common normals
+        // (excluding the two end faces which should be the least common)
+        var bestAxis = SIMD3<Float>(1, 0, 0) // fallback
+        var bestScore: Float = 0
+        
+        // Try candidate axes: bounding box axes and cross products of top normals
+        var candidateAxes: [SIMD3<Float>] = [
+            SIMD3<Float>(1, 0, 0),
+            SIMD3<Float>(0, 1, 0),
+            SIMD3<Float>(0, 0, 1)
+        ]
+        
+        // Add cross product of two most common normals (should give tube axis)
+        if allNormals.count >= 2 {
+            let n1 = allNormals[0].axis
+            let n2 = allNormals[1].axis
+            var cross = SIMD3<Float>(
+                n1.y * n2.z - n1.z * n2.y,
+                n1.z * n2.x - n1.x * n2.z,
+                n1.x * n2.y - n1.y * n2.x
+            )
+            let crossLen = length(cross)
+            if crossLen > 0.1 {
+                cross = cross / crossLen
+                // Round and normalize
+                cross.x = round(cross.x * 10) / 10
+                cross.y = round(cross.y * 10) / 10
+                cross.z = round(cross.z * 10) / 10
+                let finalLen = length(cross)
+                if finalLen > 0.1 {
+                    candidateAxes.append(cross / finalLen)
+                }
+            }
+        }
+        
+        // Score each candidate axis by counting how many high-frequency normals are perpendicular to it
+        for candidate in candidateAxes {
+            var score: Float = 0
+            for normal in allNormals.prefix(6) { // Check top 6 normals
+                let dotVal = abs(dot(normal.axis, candidate))
+                if dotVal < 0.15 { // Perpendicular
+                    score += Float(normal.count)
+                }
+            }
+            if score > bestScore {
+                bestScore = score
+                bestAxis = candidate
+            }
+        }
+        
+        print("      Computed tube axis: (\(bestAxis.x), \(bestAxis.y), \(bestAxis.z)), score=\(bestScore)")
+        
+        // Now filter to get only side walls: normals perpendicular to TRUE tube axis
+        // AND parallel to the tube axis (i.e., the normal is perpendicular to tube axis)
+        // This excludes miter faces which are tilted
+        let sideWallNormals = allNormals.filter { 
+            let perpToAxis = abs(dot($0.axis, bestAxis))
+            return perpToAxis < 0.15  // Perpendicular to tube axis (side walls)
+        }
+        
+        print("      Found \(sideWallNormals.count) normals perpendicular to tube axis")
+        
+        // For rectangular tubes: side walls form 2 pairs of perpendicular faces
+        // Miter faces don't have perpendicular partners, so we can filter them out
+        
+        print("      Candidate side walls:")
+        for (i, wall) in sideWallNormals.prefix(6).enumerated() {
+            print("        [\(i)] axis=(\(wall.axis.x), \(wall.axis.y), \(wall.axis.z)), count=\(wall.count)")
+        }
+        
+        // Find normals that have at least one perpendicular partner
+        var validSideWalls: [(axis: SIMD3<Float>, count: Int)] = []
+        
+        for candidate in sideWallNormals {
+            var hasPerpendicularPartner = false
+            
+            for other in sideWallNormals {
+                if candidate.axis == other.axis { continue }
+                
+                // Check if perpendicular (dot product ≈ 0)
+                let dotProduct = abs(dot(candidate.axis, other.axis))
+                if dotProduct < 0.15 { // Perpendicular
+                    hasPerpendicularPartner = true
+                    break
+                }
+            }
+            
+            if hasPerpendicularPartner {
+                validSideWalls.append(candidate)
+            } else {
+                print("        Excluding [\(candidate.axis)]: no perpendicular partner (likely miter)")
+            }
+        }
+        
+        print("      Found \(validSideWalls.count) side walls with perpendicular partners")
+        
+        // Take top 2 by frequency (these are the two perpendicular wall pairs)
+        let topSideWalls = Array(validSideWalls.sorted { $0.count > $1.count }.prefix(2))
+        
+        print("      Using top \(topSideWalls.count) perpendicular side walls")
+        
+        // Rebuild normalCounts with only valid side walls
+        normalCounts.removeAll()
+        for wall in topSideWalls {
+            normalCounts[wall.axis] = wall.count
+        }
+        
+        // Sort axes by frequency (the dominant flat outer walls of the tube)
+        let sortedAxes = normalCounts.sorted { $0.value > $1.value }.map { $0.key }
+        
+        // Find the two most dominant axes that are perpendicular (orthogonal) to each other
+        var axis1: SIMD3<Float>?
+        var axis2: SIMD3<Float>?
+        
+        for ax in sortedAxes {
+            if axis1 == nil {
+                axis1 = ax
+            } else if axis2 == nil {
+                // Check for orthogonality (dot product near 0)
+                if abs(dot(axis1!, ax)) < 0.15 {
+                    axis2 = ax
+                    break
+                }
+            }
+        }
+        
+        guard let a1 = axis1, let a2 = axis2 else {
+            print("      ⚠️ Failed to find two orthogonal side-wall axes")
+            return nil
+        }
+        
+        print("      Dominant side-wall axes: a1=(\(a1.x), \(a1.y), \(a1.z)), a2=(\(a2.x), \(a2.y), \(a2.z))")
+        
+        // Project all physical vertices onto these two local axes to measure the true width/height
+        var minA1 = Float.greatestFiniteMagnitude
+        var maxA1 = -Float.greatestFiniteMagnitude
+        var minA2 = Float.greatestFiniteMagnitude
+        var maxA2 = -Float.greatestFiniteMagnitude
+        
+        for v in vertices {
+            let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+            let proj1 = p.x * a1.x + p.y * a1.y + p.z * a1.z
+            let proj2 = p.x * a2.x + p.y * a2.y + p.z * a2.z
+            
+            minA1 = min(minA1, proj1)
+            maxA1 = max(maxA1, proj1)
+            minA2 = min(minA2, proj2)
+            maxA2 = max(maxA2, proj2)
+        }
+        
+        let dim1 = CGFloat(maxA1 - minA1)
+        let dim2 = CGFloat(maxA2 - minA2)
+        
+        return (width: min(dim1, dim2), height: max(dim1, dim2))
     }
     
     /// Classify stock from mesh data (fallback for non-STEP formats)
@@ -626,7 +850,6 @@ class ModelLoader {
         // Parse faces from solid
         if let facesData = solidData["faces"] as? [[String: Any]] {
             for faceData in facesData {
-                // Capture exact B-Rep surface types to prevent mesh misclassification
                 if let surfaceType = faceData["surface_type"] as? String {
                     if surfaceType == "CYLINDER" {
                         if let cylData = faceData["cylinder"] as? [String: Any],
@@ -645,31 +868,83 @@ class ModelLoader {
             }
         }
 
-        // Classify stock from mesh data first to get bounds, length, and feature detection
-        let stockInfo = classifyStock(vertices: vertices, faces: faces, normals: normals)
+        // Calculate True Bounding Box Dimensions (Strictly for length and round tube fallback)
+        var minBounds = SCNVector3(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxBounds = SCNVector3(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        for v in vertices {
+            minBounds.x = min(minBounds.x, v.x)
+            minBounds.y = min(minBounds.y, v.y)
+            minBounds.z = min(minBounds.z, v.z)
+            maxBounds.x = max(maxBounds.x, v.x)
+            maxBounds.y = max(maxBounds.y, v.y)
+            maxBounds.z = max(maxBounds.z, v.z)
+        }
         
-        // OVERRIDE: Smart B-Rep classification using cross-section ratios
+        let sizeX = CGFloat(maxBounds.x - minBounds.x)
+        let sizeY = CGFloat(maxBounds.y - minBounds.y)
+        let sizeZ = CGFloat(maxBounds.z - minBounds.z)
+        
+        let sortedDims = [sizeX, sizeY, sizeZ].sorted()
+        let crossSectionMin = sortedDims[0]
+        let crossSectionMax = sortedDims[1]
+        let length = sortedDims[2]
+
+        var axis = SIMD3<Float>(0, 0, 1)
+        if sizeX == length { axis = SIMD3<Float>(1, 0, 0) }
+        else if sizeY == length { axis = SIMD3<Float>(0, 1, 0) }
+        
+        // Attempt standard classification
+        // classifyStock measures TRUE face-to-face distance, immune to miter stretching
+        var stockInfo = classifyStock(vertices: vertices, faces: faces, normals: normals)
+        
+        if stockInfo == nil {
+            stockInfo = StockInfo(
+                profile: .unknown,
+                length: length,
+                axis: axis,
+                origin: SIMD3<Float>(Float(minBounds.x), Float(minBounds.y), Float(minBounds.z))
+            )
+        }
+        
+        // OVERRIDE: Smart B-Rep classification
         if let stock = stockInfo {
-            let boxWidth = stock.odX ?? 0
-            let boxHeight = stock.odY ?? 0
-            let maxBoxDim = max(boxWidth, boxHeight)
             let cylinderDiameter = maxCylinderRadius * 2
             
-            // If the largest cylinder makes up the vast majority (>80%) of the bounding box,
-            // it is the main body (Round Tube). If it's smaller, it's just a corner fillet.
-            let isMainBodyCylinder = (cylinderDiameter > 0) && (cylinderDiameter >= maxBoxDim * 0.8)
+            let isMainBodyCylinder = (cylinderDiameter > 0) && (cylinderDiameter >= crossSectionMax * 0.8)
+            let isRoundFallback = (planarFacesCount < 4) && (abs(crossSectionMax - crossSectionMin) < 2.0)
             
-            if isMainBodyCylinder {
+            if isMainBodyCylinder || isRoundFallback {
                 stock.profile = .round
-                stock.od = cylinderDiameter // Use exact math radius
+                stock.od = isMainBodyCylinder ? cylinderDiameter : crossSectionMax
                 stock.odX = nil
                 stock.odY = nil
             } else if planarFacesCount >= 4 {
-                // It has planes and the cylinders are just corner fillets -> Rectangular/Square
-                let isSquare = abs(boxWidth - boxHeight) < 2.0 // 2mm tolerance for squareness
+                // THE FIX: Compute the TRUE orthogonal cross-section based on surface normals.
+                // This mathematically un-rotates the tube to find its exact physical dimensions.
+                var trueDimX = crossSectionMax
+                var trueDimY = crossSectionMin
+                
+                print("    Pre-correction dims: X=\(crossSectionMax), Y=\(crossSectionMin)")
+                
+                if let trueCross = computeTrueCrossSection(vertices: vertices, normals: normals) {
+                    trueDimX = trueCross.height // the larger measurement
+                    trueDimY = trueCross.width  // the smaller measurement
+                    print("    True cross-section: width=\(trueCross.width), height=\(trueCross.height)")
+                } else {
+                    print("    ⚠️ computeTrueCrossSection failed, using fallback bounding box dims")
+                }
+                
+                let isSquare = abs(trueDimX - trueDimY) < 2.0 // 2mm tolerance
                 stock.profile = isSquare ? .square : .rectangular
+                stock.odX = trueDimX
+                stock.odY = trueDimY
                 stock.od = nil
+                
+                print("    Final classification: profile=\(stock.profile), odX=\(trueDimX), odY=\(trueDimY)")
             }
+            
+            // Ensure the unscaled, true physical length is locked in
+            stock.length = length
         }
 
         // Create shape data based on corrected stock classification
@@ -683,7 +958,8 @@ class ModelLoader {
                         diameter: stock.od ?? 0,
                         height: stock.length
                     ),
-                    isCuttable: true
+                    isCuttable: true,
+                    stockInfo: stock
                 )
             case .square, .rectangular:
                 shapeData = ShapeData(
@@ -693,7 +969,8 @@ class ModelLoader {
                         height: stock.odY ?? 0,
                         depth: stock.length
                     ),
-                    isCuttable: true
+                    isCuttable: true,
+                    stockInfo: stock
                 )
             case .unknown:
                 shapeData = ShapeData(type: .custom, dimensions: nil, isCuttable: false)
