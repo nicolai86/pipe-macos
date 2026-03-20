@@ -20,37 +20,11 @@ struct SceneKitView: NSViewRepresentable {
         scnView.autoenablesDefaultLighting = true
         scnView.backgroundColor = NSColor.black
         
-        print("=== SCNView Created ===")
-        print("  Frame: \(scnView.frame)")
-        print("  Bounds: \(scnView.bounds)")
+        // Setup Camera & Lights (existing logic)
+        setupBaseScene(scnView)
         
-        // Setup camera
-        let cameraNode = SCNNode()
-        cameraNode.name = "camera"
-        cameraNode.camera = SCNCamera()
-        cameraNode.camera?.fieldOfView = 45
-        cameraNode.position = SCNVector3(x: 0, y: 0, z: 5)
-        scnView.scene?.rootNode.addChildNode(cameraNode)
-        
-        // Set as point of view for camera control
-        scnView.pointOfView = cameraNode
-        
-        print("  Camera at (0,0,5)")
-        print("  Scene has \(scnView.scene?.rootNode.childNodes.count ?? 0) nodes")
-        
-        // Add lights
-        let ambientLight = SCNNode()
-        ambientLight.light = SCNLight()
-        ambientLight.light!.type = .ambient
-        ambientLight.light!.intensity = 1000
-        scnView.scene?.rootNode.addChildNode(ambientLight)
-        
-        let directionalLight = SCNNode()
-        directionalLight.light = SCNLight()
-        directionalLight.light!.type = .directional
-        directionalLight.light!.intensity = 1500
-        directionalLight.position = SCNVector3(x: 5, y: 5, z: 5)
-        scnView.scene?.rootNode.addChildNode(directionalLight)
+        // ADD COORDINATE SYSTEM AT 0,0,0
+        addAxes(to: scnView.scene!.rootNode)
 
         // Setup gesture recognizer for selection
         let clickGesture = NSClickGestureRecognizer(
@@ -58,12 +32,70 @@ struct SceneKitView: NSViewRepresentable {
             action: #selector(Coordinator.handleTap(_:))
         )
         scnView.addGestureRecognizer(clickGesture)
-
-        // Store coordinator reference for gesture handling
         context.coordinator.scnView = scnView
         context.coordinator.viewModel = viewModel
 
         return scnView
+    }
+    
+    /// Configures the camera and manual lighting for the scene
+    private func setupBaseScene(_ scnView: SCNView) {
+        let scene = scnView.scene!
+        
+        // Camera setup
+        let cameraNode = SCNNode()
+        cameraNode.name = "camera"
+        cameraNode.camera = SCNCamera()
+        cameraNode.camera?.fieldOfView = 45
+        cameraNode.position = SCNVector3(x: 0, y: 0, z: 5)
+        scene.rootNode.addChildNode(cameraNode)
+        scnView.pointOfView = cameraNode
+        
+        // Ambient Light: Overall visibility
+        let ambientLight = SCNLight()
+        ambientLight.type = .ambient
+        ambientLight.intensity = 400
+        let ambientNode = SCNNode()
+        ambientNode.light = ambientLight
+        scene.rootNode.addChildNode(ambientNode)
+        
+        // Directional Light: Defines shapes and shadows
+        let directionalLight = SCNLight()
+        directionalLight.type = .directional
+        directionalLight.intensity = 1000
+        let directionalNode = SCNNode()
+        directionalNode.light = directionalLight
+        directionalNode.position = SCNVector3(x: 5, y: 5, z: 10)
+        directionalNode.look(at: SCNVector3(0, 0, 0))
+        scene.rootNode.addChildNode(directionalNode)
+    }
+    
+    // Helper to build the XYZ Axis Helper
+    private func addAxes(to rootNode: SCNNode) {
+        let axisLength: CGFloat = 1.0
+        let axisThickness: CGFloat = 0.005
+        
+        func createAxis(direction: SCNVector3, color: NSColor) -> SCNNode {
+            let cylinder = SCNCylinder(radius: axisThickness, height: axisLength)
+            cylinder.firstMaterial?.diffuse.contents = color
+            let node = SCNNode(geometry: cylinder)
+            
+            // Align cylinder with the axis direction
+            if direction.x != 0 {
+                node.eulerAngles.z = .pi / 2
+                node.position = SCNVector3(axisLength/2, 0, 0)
+            } else if direction.y != 0 {
+                node.position = SCNVector3(0, axisLength/2, 0)
+            } else if direction.z != 0 {
+                node.eulerAngles.x = .pi / 2
+                node.position = SCNVector3(0, 0, axisLength/2)
+            }
+            return node
+        }
+
+        rootNode.addChildNode(createAxis(direction: SCNVector3(1, 0, 0), color: .red))   // X-Axis
+        rootNode.addChildNode(createAxis(direction: SCNVector3(0, 1, 0), color: .green)) // Y-Axis
+        rootNode.addChildNode(createAxis(direction: SCNVector3(0, 0, 1), color: .blue))  // Z-Axis
     }
     
     func updateNSView(_ scnView: SCNView, context: Context) {
@@ -94,7 +126,7 @@ struct SceneKitView: NSViewRepresentable {
             switch viewMode {
             case .wireframe:
                 geometry.firstMaterial?.fillMode = .lines
-            case .solid, .shaded:
+            case .solid:
                 geometry.firstMaterial?.fillMode = .fill
             }
         }
@@ -190,7 +222,7 @@ struct SceneKitView: NSViewRepresentable {
                 switch viewMode {
                 case .wireframe:
                     material.fillMode = .lines
-                case .solid, .shaded:
+                case .solid:
                     material.fillMode = .fill
                 }
                 
@@ -396,7 +428,7 @@ struct SceneKitView: NSViewRepresentable {
                 switch viewMode {
                 case .wireframe:
                     geometry.firstMaterial?.fillMode = .lines
-                case .solid, .shaded:
+                case .solid:
                     geometry.firstMaterial?.fillMode = .fill
                 }
             }

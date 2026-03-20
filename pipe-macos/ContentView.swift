@@ -4,18 +4,10 @@ import SceneKit
 
 // MARK: - UTType Extensions
 extension UTType {
-    static var stl: UTType {
-        UTType(filenameExtension: "stl", conformingTo: .data) ?? .data
-    }
-    
-    static var obj: UTType {
-        UTType(filenameExtension: "obj", conformingTo: .data) ?? .data
-    }
-    
     static var step: UTType {
         UTType(filenameExtension: "step", conformingTo: .data) ?? .data
     }
-    
+
     static var stp: UTType {
         UTType(filenameExtension: "stp", conformingTo: .data) ?? .data
     }
@@ -51,7 +43,7 @@ struct ContentView: View {
         }
         .fileImporter(
             isPresented: $showingFilePicker,
-            allowedContentTypes: [.stl, .obj, .step, .stp, .folder],
+            allowedContentTypes: [.step, .stp],
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -113,7 +105,6 @@ struct ToolbarView: View {
             Picker("View Mode", selection: $viewModel.viewMode) {
                 Text("Wireframe").tag(ViewMode.wireframe)
                 Text("Solid").tag(ViewMode.solid)
-                Text("Shaded").tag(ViewMode.shaded)
             }
             .pickerStyle(.segmented)
             .frame(width: 200)
@@ -314,7 +305,6 @@ struct ShapeInfoView: View {
 enum ViewMode: String, CaseIterable {
     case wireframe = "Wireframe"
     case solid = "Solid"
-    case shaded = "Shaded"
 }
 
 class AppViewModel: ObservableObject {
@@ -355,44 +345,29 @@ class AppViewModel: ObservableObject {
         }
     }
     
+    /// Generates G-code for a selected shape
     func generateGCode(for shape: SelectedShape) {
         let generator = GCodeGenerator()
         
-        let stockInfo: StockInfo?
-        if let node = shape.node, let geometry = node.geometry {
-            // Selected mesh: run stock classification on this specific mesh
-            print("=== Extracting mesh data for classification ===")
-            let vertices = extractVertices(from: geometry)
-            let faces = extractFaces(from: geometry)
-            let normals = extractNormals(from: geometry, faceCount: faces.count)
-            
-            print("  Extracted \(vertices.count) vertices, \(faces.count) faces, \(normals.count) normals")
-            
-            // Run classification on selected mesh only
-            stockInfo = ModelLoader.classifyStock(vertices: vertices, faces: faces, normals: normals)
-            
-            if let stock = stockInfo {
-                print("  Classification SUCCESS:")
-                print("    Profile: \(stock.profile.rawValue)")
-                print("    OD: \(stock.od ?? -1)")
-                print("    Dimensions: \(stock.odX ?? -1) × \(stock.odY ?? -1)")
-                print("    Length: \(stock.length)")
-                print("    Start end cut: \(stock.startEndCut?.type.rawValue ?? "none")")
-                print("    End end cut: \(stock.endEndCut?.type.rawValue ?? "none")")
-                print("    Features: \(stock.features.count)")
+        if let model = loadedModel, let globalStock = model.stockInfo {
+            if let node = shape.node {
+                // A sub-component is selected!
+                // Build a specific stock profile mapped to this part's world position
+                if let localStock = ModelLoader.classifyNode(node, baseStock: globalStock) {
+                    generatedGCode = generator.generate(for: shape, stockInfo: localStock)
+                } else {
+                    generatedGCode = generator.generate(for: shape, stockInfo: nil)
+                }
             } else {
-                print("  Classification FAILED - returned nil")
+                // Nothing selected, generate the full global stock
+                generatedGCode = generator.generate(for: shape, stockInfo: globalStock)
             }
         } else {
-            // No specific node = use full model stock info
-            print("=== Using full model stock info ===")
-            stockInfo = loadedModel?.stockInfo
+            generatedGCode = generator.generate(for: shape, stockInfo: nil)
         }
         
-        let gcode = generator.generate(for: shape, stockInfo: stockInfo)
-        DispatchQueue.main.async {
-            self.generatedGCode = gcode
-        }
+        // Post notification to save
+        NotificationCenter.default.post(name: .saveGCode, object: nil)
     }
     
     // Helper functions to extract mesh data from SceneKit geometry
