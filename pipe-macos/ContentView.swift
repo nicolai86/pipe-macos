@@ -349,21 +349,15 @@ class AppViewModel: ObservableObject {
     func generateGCode(for shape: SelectedShape) {
         let generator = GCodeGenerator()
         
-        if let model = loadedModel, let globalStock = model.stockInfo {
-            if let node = shape.node {
-                // A sub-component is selected!
-                // Build a specific stock profile mapped to this part's world position
-                if let localStock = ModelLoader.classifyNode(node, baseStock: globalStock) {
-                    generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
-                } else {
-                    generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
-                }
-            } else {
-                // Nothing selected, generate the full global stock
-                generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
-            }
+        // Use the stockInfo from the shape if available
+        if let stockInfo = shape.stockInfo {
+            generatedGCode = generator.generateGCode(for: stockInfo)
+        } else if let model = loadedModel, let globalStock = model.stockInfo {
+            // Fallback to global stock info if shape doesn't have its own
+            generatedGCode = generator.generateGCode(for: globalStock)
         } else {
-            generatedGCode = generator.generate(for: shape, stockInfo: shape.stockInfo)
+            print("No stock info available for G-code generation")
+            generatedGCode = nil
         }
         
         // Post notification to save

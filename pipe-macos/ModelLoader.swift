@@ -80,9 +80,11 @@ enum EndCutType: String, Codable {
 enum SurfaceFeatureType: String, Codable {
     case hole = "Hole"
     case notch = "Notch"
-    case cope = "Cope"
-    case scallop = "Scallop"
+    //case cope = "Cope"
+    //case scallop = "Scallop"
     case cutout = "Cutout"
+    case startCut = "StartCut"
+    case endCut     = "EndCut"
 }
 
 /// Feature shape classification
@@ -122,6 +124,7 @@ class SurfaceFeature: Codable, Identifiable {
     var confidence: CGFloat        // Detection confidence (0.0-1.0)
     var end: String?               // "start" or "end" for end features
     var wirePoints: [CGPoint]?     // Sampled points for BSpline features
+    var path: [ToolpathPoint] = []
     
     init(id: Int = 0, type: SurfaceFeatureType = .hole, shape: FeatureShape = .circle,
          xCenter: CGFloat = 0, aCenterDeg: CGFloat = 0, 
@@ -435,313 +438,116 @@ class ModelLoader {
             origin: SIMD3<Float>(Float(minBounds.x), Float(minBounds.y), Float(minBounds.z))
         )
         
-        // Run the end cut detection on this specific node's physical vertices
-        detectEndCuts(vertices: physicalVertices, axis: localAxis, stockInfo: localStock)
-        
+       
         return localStock
     }
     
-    /// Computes the true physical cross-section of a prismatic part by projecting its vertices
-        /// onto its dominant planar normals, making it immune to rotation and miters.
+    /// Computes the true physical cross-section of a prismatic part by finding the pair of
+    /// perpendicular face normals whose vertex projections span the SMALLEST distance.
+    /// True side walls span only the tube's cross-section (~38mm); miter faces, end caps,
+    /// and tube-axis directions span much larger distances and are naturally excluded.
     private static func computeTrueCrossSection(vertices: [SCNVector3], normals: [SCNVector3]) -> (width: CGFloat, height: CGFloat)? {
-        // First, determine the length axis by finding the longest dimension
-        var minBounds = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-        var maxBounds = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-        
-        for v in vertices {
-            let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
-            minBounds = SIMD3<Float>(min(minBounds.x, p.x), min(minBounds.y, p.y), min(minBounds.z, p.z))
-            maxBounds = SIMD3<Float>(max(maxBounds.x, p.x), max(maxBounds.y, p.y), max(maxBounds.z, p.z))
-        }
-        
-        let size = maxBounds - minBounds
-        let maxDim = max(size.x, max(size.y, size.z))
-        
-        print("      Bounding box size: (\(size.x), \(size.y), \(size.z))")
-        
-        // First pass: collect ALL normals to find the TRUE tube axis
+        // Collect distinct normals (round + half-space fold to merge opposite faces)
         var normalCounts: [SIMD3<Float>: Int] = [:]
-        
+
         for vNormal in normals {
-            // Convert to Float to avoid CGFloat/Double architecture differences
             let nx = Float(vNormal.x)
             let ny = Float(vNormal.y)
             let nz = Float(vNormal.z)
-            
-            // Round to 1 decimal place to group slightly divergent normals from tessellation
+
             var rx = round(nx * 10) / 10
             var ry = round(ny * 10) / 10
             var rz = round(nz * 10) / 10
-            
-            // Normalize the rounded vector
+
             let len = sqrt(rx*rx + ry*ry + rz*rz)
             guard len > 0.1 else { continue }
-            rx /= len
-            ry /= len
-            rz /= len
-            
+            rx /= len; ry /= len; rz /= len
+
             var axis = SIMD3<Float>(rx, ry, rz)
-            
-            // Force vector to point in a positive half-space (+X and -X define the same axis)
             if axis.x < 0 || (axis.x == 0 && axis.y < 0) || (axis.x == 0 && axis.y == 0 && axis.z < 0) {
                 axis = -axis
             }
-            
-            // Re-round after normalization to ensure strict grouping
             axis.x = round(axis.x * 10) / 10
             axis.y = round(axis.y * 10) / 10
             axis.z = round(axis.z * 10) / 10
-            
+
             normalCounts[axis, default: 0] += 1
         }
-        
-        // Find the TRUE tube axis by looking for 4 perpendicular normals (the side walls)
-        // For a rectangular tube, there should be 4 normals that are all perpendicular to the same axis
+
         let allNormals = normalCounts.map { (axis: $0.key, count: $0.value) }.sorted { $0.count > $1.count }
-        
+
         print("      Total distinct normals: \(allNormals.count)")
-        if allNormals.count <= 8 {
-            for (i, normal) in allNormals.enumerated() {
-                print("        [\(i)] axis=(\(normal.axis.x), \(normal.axis.y), \(normal.axis.z)), count=\(normal.count)")
+        if allNormals.count <= 10 {
+            for (i, n) in allNormals.enumerated() {
+                print("        [\(i)] axis=(\(n.axis.x), \(n.axis.y), \(n.axis.z)), count=\(n.count)")
             }
         }
-        
-        // Strategy: Find the axis that is perpendicular to the 4 most common normals
-        // (excluding the two end faces which should be the least common)
-        var bestAxis = SIMD3<Float>(1, 0, 0) // fallback
-        var bestScore: Float = 0
-        
-        // Try candidate axes: bounding box axes and cross products of top normals
-        var candidateAxes: [SIMD3<Float>] = [
-            SIMD3<Float>(1, 0, 0),
-            SIMD3<Float>(0, 1, 0),
-            SIMD3<Float>(0, 0, 1)
-        ]
-        
-        // Add cross product of two most common normals (should give tube axis)
-        if allNormals.count >= 2 {
-            let n1 = allNormals[0].axis
-            let n2 = allNormals[1].axis
-            var cross = SIMD3<Float>(
-                n1.y * n2.z - n1.z * n2.y,
-                n1.z * n2.x - n1.x * n2.z,
-                n1.x * n2.y - n1.y * n2.x
-            )
-            let crossLen = length(cross)
-            if crossLen > 0.1 {
-                cross = cross / crossLen
-                // Round and normalize
-                cross.x = round(cross.x * 10) / 10
-                cross.y = round(cross.y * 10) / 10
-                cross.z = round(cross.z * 10) / 10
-                let finalLen = length(cross)
-                if finalLen > 0.1 {
-                    candidateAxes.append(cross / finalLen)
+
+        // For each distinct normal, compute how far the vertices project onto it.
+        // Side wall normals span the tube cross-section (~38 mm).
+        // Miter / end-cap / tube-axis normals span much larger distances.
+        var normalRanges: [(axis: SIMD3<Float>, range: Float)] = []
+        for n in allNormals {
+            var minP = Float.greatestFiniteMagnitude
+            var maxP = -Float.greatestFiniteMagnitude
+            for v in vertices {
+                let px = Float(v.x)
+                let py = Float(v.y)
+                let pz = Float(v.z)
+                let proj = px * n.axis.x + py * n.axis.y + pz * n.axis.z
+                if proj < minP { minP = proj }
+                if proj > maxP { maxP = proj }
+            }
+            normalRanges.append((axis: n.axis, range: maxP - minP))
+        }
+
+        // Sort ascending by range — true side-wall normals bubble to the top
+        let sortedByRange = normalRanges.sorted { $0.range < $1.range }
+
+        print("      Normals by projection range (smallest first):")
+        for (i, n) in sortedByRange.prefix(6).enumerated() {
+            print("        [\(i)] axis=(\(n.axis.x), \(n.axis.y), \(n.axis.z)), range=\(n.range)")
+        }
+
+        // Find the two perpendicular normals whose max(range1, range2) is minimised.
+        // The correct cross-section pair wins because miter/axis projections are much larger.
+        var bestScore = Float.greatestFiniteMagnitude
+        var bestA1: SIMD3<Float>? = nil
+        var bestA2: SIMD3<Float>? = nil
+        var bestDim1: Float = 0
+        var bestDim2: Float = 0
+
+        for i in 0..<sortedByRange.count {
+            for j in (i+1)..<sortedByRange.count {
+                let ni = sortedByRange[i]
+                let nj = sortedByRange[j]
+                let dotVal = abs(dot(ni.axis, nj.axis))
+                guard dotVal < 0.15 else { continue }
+
+                let score = max(ni.range, nj.range)
+                if score < bestScore {
+                    bestScore = score
+                    bestA1 = ni.axis
+                    bestA2 = nj.axis
+                    bestDim1 = ni.range
+                    bestDim2 = nj.range
                 }
             }
         }
-        
-        // Score each candidate axis by counting how many high-frequency normals are perpendicular to it
-        for candidate in candidateAxes {
-            var score: Float = 0
-            for normal in allNormals.prefix(6) { // Check top 6 normals
-                let dotVal = abs(dot(normal.axis, candidate))
-                if dotVal < 0.15 { // Perpendicular
-                    score += Float(normal.count)
-                }
-            }
-            if score > bestScore {
-                bestScore = score
-                bestAxis = candidate
-            }
-        }
-        
-        print("      Computed tube axis: (\(bestAxis.x), \(bestAxis.y), \(bestAxis.z)), score=\(bestScore)")
-        
-        // Now filter to get only side walls: normals perpendicular to TRUE tube axis
-        // AND parallel to the tube axis (i.e., the normal is perpendicular to tube axis)
-        // This excludes miter faces which are tilted
-        let sideWallNormals = allNormals.filter { 
-            let perpToAxis = abs(dot($0.axis, bestAxis))
-            return perpToAxis < 0.15  // Perpendicular to tube axis (side walls)
-        }
-        
-        print("      Found \(sideWallNormals.count) normals perpendicular to tube axis")
-        
-        // For rectangular tubes: side walls form 2 pairs of perpendicular faces
-        // Miter faces don't have perpendicular partners, so we can filter them out
-        
-        print("      Candidate side walls:")
-        for (i, wall) in sideWallNormals.prefix(6).enumerated() {
-            print("        [\(i)] axis=(\(wall.axis.x), \(wall.axis.y), \(wall.axis.z)), count=\(wall.count)")
-        }
-        
-        // Find normals that have at least one perpendicular partner
-        var validSideWalls: [(axis: SIMD3<Float>, count: Int)] = []
-        
-        for candidate in sideWallNormals {
-            var hasPerpendicularPartner = false
-            
-            for other in sideWallNormals {
-                if candidate.axis == other.axis { continue }
-                
-                // Check if perpendicular (dot product ≈ 0)
-                let dotProduct = abs(dot(candidate.axis, other.axis))
-                if dotProduct < 0.15 { // Perpendicular
-                    hasPerpendicularPartner = true
-                    break
-                }
-            }
-            
-            if hasPerpendicularPartner {
-                validSideWalls.append(candidate)
-            } else {
-                print("        Excluding [\(candidate.axis)]: no perpendicular partner (likely miter)")
-            }
-        }
-        
-        print("      Found \(validSideWalls.count) side walls with perpendicular partners")
-        
-        // Take top 2 by frequency (these are the two perpendicular wall pairs)
-        let topSideWalls = Array(validSideWalls.sorted { $0.count > $1.count }.prefix(2))
-        
-        print("      Using top \(topSideWalls.count) perpendicular side walls")
-        
-        // Rebuild normalCounts with only valid side walls
-        normalCounts.removeAll()
-        for wall in topSideWalls {
-            normalCounts[wall.axis] = wall.count
-        }
-        
-        // Sort axes by frequency (the dominant flat outer walls of the tube)
-        let sortedAxes = normalCounts.sorted { $0.value > $1.value }.map { $0.key }
-        
-        // Find the two most dominant axes that are perpendicular (orthogonal) to each other
-        var axis1: SIMD3<Float>?
-        var axis2: SIMD3<Float>?
-        
-        for ax in sortedAxes {
-            if axis1 == nil {
-                axis1 = ax
-            } else if axis2 == nil {
-                // Check for orthogonality (dot product near 0)
-                if abs(dot(axis1!, ax)) < 0.15 {
-                    axis2 = ax
-                    break
-                }
-            }
-        }
-        
-        guard let a1 = axis1, let a2 = axis2 else {
+
+        guard let a1 = bestA1, let a2 = bestA2 else {
             print("      ⚠️ Failed to find two orthogonal side-wall axes")
             return nil
         }
-        
+
         print("      Dominant side-wall axes: a1=(\(a1.x), \(a1.y), \(a1.z)), a2=(\(a2.x), \(a2.y), \(a2.z))")
-        
-        // Project all physical vertices onto these two local axes to measure the true width/height
-        var minA1 = Float.greatestFiniteMagnitude
-        var maxA1 = -Float.greatestFiniteMagnitude
-        var minA2 = Float.greatestFiniteMagnitude
-        var maxA2 = -Float.greatestFiniteMagnitude
-        
-        for v in vertices {
-            let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
-            let proj1 = p.x * a1.x + p.y * a1.y + p.z * a1.z
-            let proj2 = p.x * a2.x + p.y * a2.y + p.z * a2.z
-            
-            minA1 = min(minA1, proj1)
-            maxA1 = max(maxA1, proj1)
-            minA2 = min(minA2, proj2)
-            maxA2 = max(maxA2, proj2)
-        }
-        
-        let dim1 = CGFloat(maxA1 - minA1)
-        let dim2 = CGFloat(maxA2 - minA2)
-        
+
+        let dim1 = CGFloat(bestDim1)
+        let dim2 = CGFloat(bestDim2)
         return (width: min(dim1, dim2), height: max(dim1, dim2))
     }
     
-    /// Classify stock from mesh data (fallback for non-STEP formats)
-    static func classifyStock(vertices: [SCNVector3], faces: [[Int]], 
-                              normals: [SCNVector3]) -> StockInfo? {
-        guard !vertices.isEmpty, !faces.isEmpty else { return nil }
-        
-        // Compute bounding box
-        var minPoint = SCNVector3(Float.greatestFiniteMagnitude, 
-                                   Float.greatestFiniteMagnitude, 
-                                   Float.greatestFiniteMagnitude)
-        var maxPoint = SCNVector3(-Float.greatestFiniteMagnitude, 
-                                   -Float.greatestFiniteMagnitude, 
-                                   -Float.greatestFiniteMagnitude)
-        
-        for v in vertices {
-            minPoint.x = min(minPoint.x, v.x)
-            minPoint.y = min(minPoint.y, v.y)
-            minPoint.z = min(minPoint.z, v.z)
-            maxPoint.x = max(maxPoint.x, v.x)
-            maxPoint.y = max(maxPoint.y, v.y)
-            maxPoint.z = max(maxPoint.z, v.z)
-        }
-        
-        let size = SCNVector3(maxPoint.x - minPoint.x, 
-                              maxPoint.y - minPoint.y, 
-                              maxPoint.z - minPoint.z)
-        
-        // Determine primary axis
-        let maxDim = Swift.max(size.x, Swift.max(size.y, size.z))
-        var axis: SIMD3<Float>
-        
-        if size.x == maxDim {
-            axis = SIMD3<Float>(1, 0, 0)
-        } else if size.y == maxDim {
-            axis = SIMD3<Float>(0, 1, 0)
-        } else {
-            axis = SIMD3<Float>(0, 0, 1)
-        }
-        
-        // Analyze face normals to determine profile type
-        let normalAnalysis = analyzeNormals(normals)
-        
-        let stockInfo: StockInfo
-        
-        if normalAnalysis.isCylindrical {
-            // Round tube classification
-            let avgRadius = normalAnalysis.averageRadius
-            stockInfo = StockInfo(
-                profile: .round,
-                od: CGFloat(avgRadius) * 2,
-                length: CGFloat(maxDim),
-                axis: axis,
-                origin: SIMD3<Float>(Float(minPoint.x), Float(minPoint.y), Float(minPoint.z))
-            )
-        } else if normalAnalysis.isPlanar {
-            // Rectangular tube classification
-            let dims = classifyRectangularDimensions(size: size, normalAnalysis: normalAnalysis)
-            stockInfo = StockInfo(
-                profile: dims.isSquare ? .square : .rectangular,
-                // FIX: Use the sorted dimensions from classifyRectangularDimensions
-                // instead of the raw, unsorted size.x / size.y bounding box
-                odX: dims.odX,
-                odY: dims.odY,
-                length: CGFloat(maxDim),
-                axis: axis,
-                origin: SIMD3<Float>(Float(minPoint.x), Float(minPoint.y), Float(minPoint.z))
-            )
-        } else {
-            return nil
-        }
-        
-        // Detect end cuts from mesh
-        detectEndCuts(vertices: vertices, axis: axis, stockInfo: stockInfo)
-        
-        // Detect features from mesh
-        detectFeatures(vertices: vertices, faces: faces, normals: normals, 
-                       axis: axis, stockInfo: stockInfo)
-        
-        return stockInfo
-    }
-    
+   
     // MARK: - STEP File Loading
     
     /// Load STEP file using OpenCASCADE kernel
@@ -837,152 +643,7 @@ class ModelLoader {
         return Model3D(name: modelName, meshes: meshes, stockInfo: primaryStock, sourceURL: url)
     }
     
-    /// Parse individual solid from STEP data
-    private static func parseSolid(_ solidData: [String: Any], index: Int) throws -> (Mesh3D, StockInfo?) {
-        // Extract faces and build mesh
-        var vertices: [SCNVector3] = []
-        var faces: [[Int]] = []
-        var normals: [SCNVector3] = []
-
-        var maxCylinderRadius: CGFloat = 0
-        var planarFacesCount = 0
-
-        // Parse faces from solid
-        if let facesData = solidData["faces"] as? [[String: Any]] {
-            for faceData in facesData {
-                if let surfaceType = faceData["surface_type"] as? String {
-                    if surfaceType == "CYLINDER" {
-                        if let cylData = faceData["cylinder"] as? [String: Any],
-                           let radius = cylData["radius"] as? Double {
-                            maxCylinderRadius = max(maxCylinderRadius, CGFloat(radius))
-                        }
-                    } else if surfaceType == "PLANE" {
-                        planarFacesCount += 1
-                    }
-                }
-
-                let (faceVerts, faceIndices, faceNormals) = try parseFace(faceData, vertexOffset: vertices.count)
-                vertices.append(contentsOf: faceVerts)
-                faces.append(contentsOf: faceIndices)
-                normals.append(contentsOf: faceNormals)
-            }
-        }
-
-        // Calculate True Bounding Box Dimensions (Strictly for length and round tube fallback)
-        var minBounds = SCNVector3(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-        var maxBounds = SCNVector3(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-        for v in vertices {
-            minBounds.x = min(minBounds.x, v.x)
-            minBounds.y = min(minBounds.y, v.y)
-            minBounds.z = min(minBounds.z, v.z)
-            maxBounds.x = max(maxBounds.x, v.x)
-            maxBounds.y = max(maxBounds.y, v.y)
-            maxBounds.z = max(maxBounds.z, v.z)
-        }
-        
-        let sizeX = CGFloat(maxBounds.x - minBounds.x)
-        let sizeY = CGFloat(maxBounds.y - minBounds.y)
-        let sizeZ = CGFloat(maxBounds.z - minBounds.z)
-        
-        let sortedDims = [sizeX, sizeY, sizeZ].sorted()
-        let crossSectionMin = sortedDims[0]
-        let crossSectionMax = sortedDims[1]
-        let length = sortedDims[2]
-
-        var axis = SIMD3<Float>(0, 0, 1)
-        if sizeX == length { axis = SIMD3<Float>(1, 0, 0) }
-        else if sizeY == length { axis = SIMD3<Float>(0, 1, 0) }
-        
-        // Attempt standard classification
-        // classifyStock measures TRUE face-to-face distance, immune to miter stretching
-        var stockInfo = classifyStock(vertices: vertices, faces: faces, normals: normals)
-        
-        if stockInfo == nil {
-            stockInfo = StockInfo(
-                profile: .unknown,
-                length: length,
-                axis: axis,
-                origin: SIMD3<Float>(Float(minBounds.x), Float(minBounds.y), Float(minBounds.z))
-            )
-        }
-        
-        // OVERRIDE: Smart B-Rep classification
-        if let stock = stockInfo {
-            let cylinderDiameter = maxCylinderRadius * 2
-            
-            let isMainBodyCylinder = (cylinderDiameter > 0) && (cylinderDiameter >= crossSectionMax * 0.8)
-            let isRoundFallback = (planarFacesCount < 4) && (abs(crossSectionMax - crossSectionMin) < 2.0)
-            
-            if isMainBodyCylinder || isRoundFallback {
-                stock.profile = .round
-                stock.od = isMainBodyCylinder ? cylinderDiameter : crossSectionMax
-                stock.odX = nil
-                stock.odY = nil
-            } else if planarFacesCount >= 4 {
-                // THE FIX: Compute the TRUE orthogonal cross-section based on surface normals.
-                // This mathematically un-rotates the tube to find its exact physical dimensions.
-                var trueDimX = crossSectionMax
-                var trueDimY = crossSectionMin
-                
-                print("    Pre-correction dims: X=\(crossSectionMax), Y=\(crossSectionMin)")
-                
-                if let trueCross = computeTrueCrossSection(vertices: vertices, normals: normals) {
-                    trueDimX = trueCross.height // the larger measurement
-                    trueDimY = trueCross.width  // the smaller measurement
-                    print("    True cross-section: width=\(trueCross.width), height=\(trueCross.height)")
-                } else {
-                    print("    ⚠️ computeTrueCrossSection failed, using fallback bounding box dims")
-                }
-                
-                let isSquare = abs(trueDimX - trueDimY) < 2.0 // 2mm tolerance
-                stock.profile = isSquare ? .square : .rectangular
-                stock.odX = trueDimX
-                stock.odY = trueDimY
-                stock.od = nil
-                
-                print("    Final classification: profile=\(stock.profile), odX=\(trueDimX), odY=\(trueDimY)")
-            }
-            
-            // Ensure the unscaled, true physical length is locked in
-            stock.length = length
-        }
-
-        // Create shape data based on corrected stock classification
-        let shapeData: ShapeData?
-        if let stock = stockInfo {
-            switch stock.profile {
-            case .round:
-                shapeData = ShapeData(
-                    type: .cylinder,
-                    dimensions: CylinderDimensions(
-                        diameter: stock.od ?? 0,
-                        height: stock.length
-                    ),
-                    isCuttable: true,
-                    stockInfo: stock
-                )
-            case .square, .rectangular:
-                shapeData = ShapeData(
-                    type: .box,
-                    dimensions: BoxDimensions(
-                        width: stock.odX ?? 0,
-                        height: stock.odY ?? 0,
-                        depth: stock.length
-                    ),
-                    isCuttable: true,
-                    stockInfo: stock
-                )
-            case .unknown:
-                shapeData = ShapeData(type: .custom, dimensions: nil, isCuttable: false)
-            }
-        } else {
-            shapeData = ShapeData(type: .custom, dimensions: nil, isCuttable: false)
-        }
-
-        let mesh = Mesh3D(vertices: vertices, faces: faces, normals: normals, shapeData: shapeData)
-
-        return (mesh, stockInfo)
-    }
+    
     
     /// Parse face from STEP B-Rep
     private static func parseFace(_ faceData: [String: Any],
@@ -1735,57 +1396,6 @@ class ModelLoader {
     
     // MARK: - End Cut Detection
     
-    private static func detectEndCuts(vertices: [SCNVector3], axis: SIMD3<Float>,
-                                           stockInfo: StockInfo) {
-        guard !vertices.isEmpty else { return }
-
-        var axialPositions: [CGFloat] = []
-        for v in vertices {
-            let pos = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
-            axialPositions.append(CGFloat(dot(pos, axis)))
-        }
-
-        guard let minPos = axialPositions.min(),
-              let maxPos = axialPositions.max() else { return }
-
-        let endThreshold = (maxPos - minPos) * 0.1
-        let startVertices = axialPositions.filter { $0 < minPos + endThreshold }
-        let endVertices = axialPositions.filter { $0 > maxPos - endThreshold }
-        
-        // Use true width for square tubes, fallback to OD for round
-        let effectiveWidth = stockInfo.odX ?? stockInfo.od ?? 50.0
-        
-        if let startVar = getAxialVariation(startVertices, axis: axis, vertices: vertices),
-           startVar > endThreshold * 0.5 {
-            let miterAngle = atan(Double(startVar) / Double(effectiveWidth)) * 180.0 / .pi
-            // FIX: Shift centerline forward from the start tip
-            let centerline = minPos + (startVar / 2.0)
-            stockInfo.startEndCut = EndCutInfo(
-                type: .miter,
-                miterAngleDeg: CGFloat(miterAngle),
-                miterDirectionDeg: 0,
-                xAtCenterline: CGFloat(centerline)
-            )
-        } else {
-            stockInfo.startEndCut = EndCutInfo(type: .square, xAtCenterline: CGFloat(minPos))
-        }
-        
-        if let endVar = getAxialVariation(endVertices, axis: axis, vertices: vertices),
-           endVar > endThreshold * 0.5 {
-            let miterAngle = atan(Double(endVar) / Double(effectiveWidth)) * 180.0 / .pi
-            // FIX: Shift centerline backward from the end tip
-            let centerline = maxPos - (endVar / 2.0)
-            stockInfo.endEndCut = EndCutInfo(
-                type: .miter,
-                miterAngleDeg: CGFloat(miterAngle),
-                miterDirectionDeg: 0,
-                xAtCenterline: CGFloat(centerline)
-            )
-        } else {
-            stockInfo.endEndCut = EndCutInfo(type: .square, xAtCenterline: CGFloat(maxPos))
-        }
-    }
-    
     private static func getAxialVariation(_ axialPositions: [CGFloat], 
                                            axis: SIMD3<Float>, 
                                            vertices: [SCNVector3]) -> CGFloat? {
@@ -1797,130 +1407,483 @@ class ModelLoader {
         return maxVal - minVal
     }
     
-    // MARK: - Feature Detection
-    
-    private static func detectFeatures(vertices: [SCNVector3], faces: [[Int]], 
-                                        normals: [SCNVector3],
-                                        axis: SIMD3<Float>, stockInfo: StockInfo) {
-        // Feature detection from mesh is approximate
-        // STEP B-Rep would provide exact wire information
-        
-        // Look for vertices that deviate from expected surface
-        let expectedRadius = (stockInfo.od ?? 50) / 2
-
-        var featureVertices: [(vertex: SCNVector3, axialPos: CGFloat,
-                               angle: CGFloat, depth: CGFloat)] = []
-
-        for v in vertices {
-            let pos = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
-            let axialPos = dot(pos, axis)
-
-            // Calculate radial distance from axis
-            let radialVec = pos - axis * Float(axialPos)
-            let radialDist = length(radialVec)
-
-            let inwardDepth = CGFloat(Float(expectedRadius) - radialDist)
-            let cutoutThreshold: CGFloat = 2.0  // mm
-
-            if inwardDepth > cutoutThreshold {
-                // Calculate angular position
-                let angle = atan2(Double(radialVec.y), Double(radialVec.x)) * 180.0 / .pi
-
-                featureVertices.append((v, CGFloat(axialPos), CGFloat(angle), inwardDepth))
-            }
-        }
-        
-        // Group feature vertices into features
-        var featureId = 0
-        let groupedFeatures = groupFeatureVertices(featureVertices)
-        
-        for group in groupedFeatures {
-            guard group.count >= 3 else { continue }
+    /// Classify stock from mesh data (fallback for non-STEP formats)
+        static func classifyStock(vertices: [SCNVector3], faces: [[Int]],
+                                  normals: [SCNVector3]) -> StockInfo? {
+            guard !vertices.isEmpty, !faces.isEmpty else { return nil }
             
-            // Calculate feature bounds
-            var minAxial = CGFloat.greatestFiniteMagnitude
-            var maxAxial = -CGFloat.greatestFiniteMagnitude
-            var minAngle = CGFloat.greatestFiniteMagnitude
-            var maxAngle = -CGFloat.greatestFiniteMagnitude
-            var maxDepth: CGFloat = 0
+            // Compute bounding box
+            var minPoint = SCNVector3(Float.greatestFiniteMagnitude,
+                                       Float.greatestFiniteMagnitude,
+                                       Float.greatestFiniteMagnitude)
+            var maxPoint = SCNVector3(-Float.greatestFiniteMagnitude,
+                                       -Float.greatestFiniteMagnitude,
+                                       -Float.greatestFiniteMagnitude)
             
-            for item in group {
-                minAxial = min(minAxial, item.axialPos)
-                maxAxial = max(maxAxial, item.axialPos)
-                minAngle = min(minAngle, item.angle)
-                maxAngle = max(maxAngle, item.angle)
-                maxDepth = max(maxDepth, item.depth)
+            for v in vertices {
+                minPoint.x = min(minPoint.x, v.x)
+                minPoint.y = min(minPoint.y, v.y)
+                minPoint.z = min(minPoint.z, v.z)
+                maxPoint.x = max(maxPoint.x, v.x)
+                maxPoint.y = max(maxPoint.y, v.y)
+                maxPoint.z = max(maxPoint.z, v.z)
             }
             
-            let xCenter = (minAxial + maxAxial) / 2
-            let aCenter = (minAngle + maxAngle) / 2
-            let width = maxAxial - minAxial
-            let height = maxAngle - minAngle
+            let size = SCNVector3(maxPoint.x - minPoint.x,
+                                  maxPoint.y - minPoint.y,
+                                  maxPoint.z - minPoint.z)
             
-            // Classify feature type
-            let feature: SurfaceFeature
-            if abs(width - height) < 10 {
-                // Approximately circular
-                feature = SurfaceFeature(
-                    id: featureId,
-                    type: .hole,
-                    shape: .circle,
-                    xCenter: xCenter,
-                    aCenterDeg: aCenter,
-                    dimensions: ["diameter": max(width, height)],
-                    confidence: 0.7
+            // Determine primary axis
+            let maxDim = Swift.max(size.x, Swift.max(size.y, size.z))
+            var axis: SIMD3<Float>
+            
+            if size.x == maxDim {
+                axis = SIMD3<Float>(1, 0, 0)
+            } else if size.y == maxDim {
+                axis = SIMD3<Float>(0, 1, 0)
+            } else {
+                axis = SIMD3<Float>(0, 0, 1)
+            }
+            
+            let normalAnalysis = analyzeNormals(normals)
+            let stockInfo: StockInfo
+            
+            if normalAnalysis.isCylindrical {
+                let avgRadius = normalAnalysis.averageRadius
+                stockInfo = StockInfo(
+                    profile: .round,
+                    od: CGFloat(avgRadius) * 2,
+                    length: CGFloat(maxDim),
+                    axis: axis,
+                    origin: SIMD3<Float>(Float(minPoint.x), Float(minPoint.y), Float(minPoint.z))
+                )
+            } else if normalAnalysis.isPlanar {
+                let dims = classifyRectangularDimensions(size: size, normalAnalysis: normalAnalysis)
+                stockInfo = StockInfo(
+                    profile: dims.isSquare ? .square : .rectangular,
+                    odX: dims.odX,
+                    odY: dims.odY,
+                    length: CGFloat(maxDim),
+                    axis: axis,
+                    origin: SIMD3<Float>(Float(minPoint.x), Float(minPoint.y), Float(minPoint.z))
                 )
             } else {
-                // Rectangular notch
-                feature = SurfaceFeature(
-                    id: featureId,
-                    type: .notch,
-                    shape: .rectangle,
-                    xCenter: xCenter,
-                    aCenterDeg: aCenter,
-                    dimensions: ["width": width, "height": height, "depth": maxDepth],
-                    confidence: 0.6
-                )
+                return nil
             }
             
-            stockInfo.features.append(feature)
-            featureId += 1
-        }
-    }
-    
-    private static func groupFeatureVertices(_ vertices: [(vertex: SCNVector3, 
-                                                            axialPos: CGFloat, 
-                                                            angle: CGFloat, 
-                                                            depth: CGFloat)]) 
-    -> [[(vertex: SCNVector3, axialPos: CGFloat, angle: CGFloat, depth: CGFloat)]] {
-        var groups: [[(vertex: SCNVector3, axialPos: CGFloat, angle: CGFloat, depth: CGFloat)]] = []
-        
-        for item in vertices {
-            var assignedToGroup = -1
+            // Use nil for isCutTriangle to trigger the fallback raw mesh analyzer
+            detectFeatures(vertices: vertices, faces: faces,
+                           axis: axis, stockInfo: stockInfo)
             
-            for (groupIdx, group) in groups.enumerated() {
-                for existing in group {
-                    let axialDist = abs(item.axialPos - existing.axialPos)
-                    let angleDist = min(abs(item.angle - existing.angle), 
-                                        360 - abs(item.angle - existing.angle))
+            return stockInfo
+        }
+        private static func parseSolid(_ solidData: [String: Any], index: Int) throws -> (Mesh3D, StockInfo?) {
+            var stepFaces: [(verts: [SCNVector3], indices: [[Int]], norms: [SCNVector3])] = []
+            var rawVertices: [SCNVector3] = []
+
+            var maxCylinderRadius: CGFloat = 0
+            var planarFacesCount = 0
+
+            if let facesData = solidData["faces"] as? [[String: Any]] {
+                for faceData in facesData {
+                    if let surfaceType = faceData["surface_type"] as? String {
+                        if surfaceType == "CYLINDER" {
+                            if let cylData = faceData["cylinder"] as? [String: Any],
+                               let radius = cylData["radius"] as? Double {
+                                maxCylinderRadius = max(maxCylinderRadius, CGFloat(radius))
+                            }
+                        } else if surfaceType == "PLANE" {
+                            planarFacesCount += 1
+                        }
+                    }
+
+                    let (faceVerts, faceIndices, faceNormals) = try parseFace(faceData, vertexOffset: rawVertices.count)
+                    stepFaces.append((faceVerts, faceIndices, faceNormals))
+                    rawVertices.append(contentsOf: faceVerts)
+                }
+            }
+
+            var minBounds = SCNVector3(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+            var maxBounds = SCNVector3(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+            for v in rawVertices {
+                minBounds.x = min(minBounds.x, v.x); minBounds.y = min(minBounds.y, v.y); minBounds.z = min(minBounds.z, v.z)
+                maxBounds.x = max(maxBounds.x, v.x); maxBounds.y = max(maxBounds.y, v.y); maxBounds.z = max(maxBounds.z, v.z)
+            }
+            
+            let sizeX = CGFloat(maxBounds.x - minBounds.x)
+            let sizeY = CGFloat(maxBounds.y - minBounds.y)
+            let sizeZ = CGFloat(maxBounds.z - minBounds.z)
+            let sortedDims = [sizeX, sizeY, sizeZ].sorted()
+            let crossSectionMin = sortedDims[0]
+            let crossSectionMax = sortedDims[1]
+            let length = sortedDims[2]
+
+            var axis = SIMD3<Float>(0, 0, 1)
+            if sizeX == length { axis = SIMD3<Float>(1, 0, 0) }
+            else if sizeY == length { axis = SIMD3<Float>(0, 1, 0) }
+            
+            var flattenedFaces: [[Int]] = []
+            var flattenedNormals: [SCNVector3] = []
+            for sf in stepFaces {
+                flattenedFaces.append(contentsOf: sf.indices)
+                flattenedNormals.append(contentsOf: sf.norms)
+            }
+            
+            var stockInfo = classifyStock(vertices: rawVertices, faces: flattenedFaces, normals: flattenedNormals)
+            if stockInfo == nil {
+                stockInfo = StockInfo(profile: .unknown, length: length, axis: axis, origin: SIMD3<Float>(Float(minBounds.x), Float(minBounds.y), Float(minBounds.z)))
+            }
+            
+            if let stock = stockInfo {
+                let cylinderDiameter = maxCylinderRadius * 2
+                let isMainBodyCylinder = (cylinderDiameter > 0) && (cylinderDiameter >= crossSectionMax * 0.8)
+                let isRoundFallback = (planarFacesCount < 4) && (abs(crossSectionMax - crossSectionMin) < 2.0)
+                
+                if isMainBodyCylinder || isRoundFallback {
+                    stock.profile = .round
+                    stock.od = isMainBodyCylinder ? cylinderDiameter : crossSectionMax
+                    stock.odX = nil; stock.odY = nil
+                } else if planarFacesCount >= 4 {
+                    var trueDimX = crossSectionMax; var trueDimY = crossSectionMin
+                    if let trueCross = computeTrueCrossSection(vertices: rawVertices, normals: flattenedNormals) {
+                        trueDimX = trueCross.height; trueDimY = trueCross.width
+                    }
+                    stock.profile = abs(trueDimX - trueDimY) < 2.0 ? .square : .rectangular
+                    stock.odX = trueDimX; stock.odY = trueDimY; stock.od = nil
+                }
+                
+                stock.length = length; stock.axis = axis
+                stock.origin = SIMD3<Float>(Float(minBounds.x), Float(minBounds.y), Float(minBounds.z))
+                
+                // Clean extraction
+                stock.features.removeAll()
+                detectFeatures(vertices: rawVertices, faces: flattenedFaces, axis: stock.axis, stockInfo: stock)
+            }
+
+            let shapeData: ShapeData?
+            if let stock = stockInfo {
+                switch stock.profile {
+                case .round: shapeData = ShapeData(type: .cylinder, dimensions: CylinderDimensions(diameter: stock.od ?? 0, height: stock.length), isCuttable: true, stockInfo: stock)
+                case .square, .rectangular: shapeData = ShapeData(type: .box, dimensions: BoxDimensions(width: stock.odX ?? 0, height: stock.odY ?? 0, depth: stock.length), isCuttable: true, stockInfo: stock)
+                case .unknown: shapeData = ShapeData(type: .custom, dimensions: nil, isCuttable: false)
+                }
+            } else {
+                shapeData = ShapeData(type: .custom, dimensions: nil, isCuttable: false)
+            }
+
+            return (Mesh3D(vertices: rawVertices, faces: flattenedFaces, normals: flattenedNormals, shapeData: shapeData), stockInfo)
+        }
+
+    private static func detectFeatures(vertices: [SCNVector3], faces: [[Int]],
+                                           axis: SIMD3<Float>, stockInfo: StockInfo) {
+            
+            let normalizedAxis = normalize(axis)
+            var tempUp = SIMD3<Float>(0, 1, 0)
+            if abs(normalizedAxis.y) > 0.9 { tempUp = SIMD3<Float>(1, 0, 0) }
+            let uVec = normalize(cross(tempUp, normalizedAxis))
+            let vVec = normalize(cross(normalizedAxis, uVec))
+
+            // 1. Vertex Merging (Heals STEP Seams)
+            struct HashablePoint: Hashable {
+                let x: Int, y: Int, z: Int
+                init(_ v: SCNVector3) {
+                    self.x = Int(round(v.x * 1000)); self.y = Int(round(v.y * 1000)); self.z = Int(round(v.z * 1000))
+                }
+            }
+            
+            var uniqueVertices: [SCNVector3] = []
+            var vertexMap: [Int] = Array(repeating: 0, count: vertices.count)
+            var pointToIndex: [HashablePoint: Int] = [:]
+            
+            for (i, v) in vertices.enumerated() {
+                let hp = HashablePoint(v)
+                if let existing = pointToIndex[hp] {
+                    vertexMap[i] = existing
+                } else {
+                    let newIdx = uniqueVertices.count
+                    uniqueVertices.append(v)
+                    pointToIndex[hp] = newIdx
+                    vertexMap[i] = newIdx
+                }
+            }
+            
+            var mergedFaces: [[Int]] = []
+            for face in faces {
+                let mapped = face.map { vertexMap[$0] }
+                if mapped.count >= 3 && mapped[0] != mapped[1] && mapped[1] != mapped[2] && mapped[2] != mapped[0] {
+                    mergedFaces.append(mapped)
+                }
+            }
+
+            // 2. Find Core Geometry Center & True Physical Bounds
+            var minX = Float.greatestFiniteMagnitude, maxX = -Float.greatestFiniteMagnitude
+            var minU = Float.greatestFiniteMagnitude, maxU = -Float.greatestFiniteMagnitude
+            var minV = Float.greatestFiniteMagnitude, maxV = -Float.greatestFiniteMagnitude
+            
+            for v in uniqueVertices {
+                let pos = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+                let axial = dot(pos, normalizedAxis)
+                let u = dot(pos, uVec); let vPos = dot(pos, vVec)
+                if axial < minX { minX = axial }; if axial > maxX { maxX = axial }
+                if u < minU { minU = u }; if u > maxU { maxU = u }
+                if vPos < minV { minV = vPos }; if vPos > maxV { maxV = vPos }
+            }
+            
+            let centerU = (minU + maxU) / 2.0; let centerV = (minV + maxV) / 2.0
+            let tubeLength = maxX - minX
+            
+            // Dynamically derived boundaries directly from the mesh
+            let maxAbsU = (maxU - minU) / 2.0
+            let maxAbsV = (maxV - minV) / 2.0
+
+            // 3. Identify Outer Wall Triangles universally
+            var isOuterWall = Array(repeating: false, count: mergedFaces.count)
+            
+            for (i, face) in mergedFaces.enumerated() {
+                let v0 = uniqueVertices[face[0]]
+                let v1 = uniqueVertices[face[1]]
+                let v2 = uniqueVertices[face[2]]
+                
+                let centerX = (v0.x + v1.x + v2.x) / 3.0
+                let centerY = (v0.y + v1.y + v2.y) / 3.0
+                let centerZ = (v0.z + v1.z + v2.z) / 3.0
+                let center = SIMD3<Float>(Float(centerX), Float(centerY), Float(centerZ))
+                
+                let e1x = v1.x - v0.x
+                let e1y = v1.y - v0.y
+                let e1z = v1.z - v0.z
+                
+                let e2x = v2.x - v0.x
+                let e2y = v2.y - v0.y
+                let e2z = v2.z - v0.z
+                
+                let nx = e1y * e2z - e1z * e2y
+                let ny = e1z * e2x - e1x * e2z
+                let nz = e1x * e2y - e1y * e2x
+                
+                let lenSquared = nx * nx + ny * ny + nz * nz
+                let len = sqrt(lenSquared)
+                let faceNormal = len > 1e-6 ? SIMD3<Float>(Float(nx/len), Float(ny/len), Float(nz/len)) : SIMD3<Float>(0, 0, 1)
+                
+                let axialComponent = abs(dot(faceNormal, normalizedAxis))
+                
+                if axialComponent < 0.3 {
+                    let u = dot(center, uVec) - centerU
+                    let vPos = dot(center, vVec) - centerV
+                    let normU = dot(faceNormal, uVec)
+                    let normV = dot(faceNormal, vVec)
                     
-                    if axialDist < 5 && angleDist < 15 {
-                        assignedToGroup = groupIdx
+                    // outwardDot isolates inner walls/cut faces from outer faces
+                    let outwardDot = u * normU + vPos * normV
+                    
+                    if outwardDot > 2.0 {
+                        if stockInfo.profile == .round {
+                            if outwardDot > maxAbsU - 5.0 { isOuterWall[i] = true }
+                        } else {
+                            // Mathematically maps the exact dimensions of the rectangular box
+                            let maxTheoreticalDot = maxAbsU * abs(normU) + maxAbsV * abs(normV)
+                            
+                            // Corner radii cause the dot product to drop slightly off theoretical max
+                            let isCornerNormal = abs(normU) > 0.15 && abs(normV) > 0.15
+                            let tolerance: Float = isCornerNormal ? 15.0 : 2.5
+                            
+                            if outwardDot > maxTheoreticalDot - tolerance {
+                                isOuterWall[i] = true
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Extract Boundary Edges Topologically
+            struct Edge: Hashable {
+                let a: Int, b: Int
+                init(_ v1: Int, _ v2: Int) { self.a = min(v1, v2); self.b = max(v1, v2) }
+            }
+            
+            var edgeCount: [Edge: Int] = [:]
+            for (i, face) in mergedFaces.enumerated() where isOuterWall[i] {
+                let edges = [Edge(face[0], face[1]), Edge(face[1], face[2]), Edge(face[2], face[0])]
+                for e in edges { edgeCount[e, default: 0] += 1 }
+            }
+            
+            var adjacency: [Int: [Int]] = [:]
+            for (e, count) in edgeCount where count == 1 {
+                adjacency[e.a, default: []].append(e.b)
+                adjacency[e.b, default: []].append(e.a)
+            }
+
+            // 5. Chain Edges into Closed Feature Loops
+            var visitedVertices = Set<Int>()
+            var loops: [[Int]] = []
+            
+            for startVertex in adjacency.keys {
+                if visitedVertices.contains(startVertex) { continue }
+                
+                var loop: [Int] = []
+                var current = startVertex
+                var previous = -1
+                
+                while true {
+                    loop.append(current)
+                    visitedVertices.insert(current)
+                    
+                    let neighbors = adjacency[current] ?? []
+                    var next = -1
+                    for n in neighbors where n != previous && !visitedVertices.contains(n) {
+                        next = n
+                        break
+                    }
+                    
+                    if next == -1 { break }
+                    previous = current
+                    current = next
+                }
+                if loop.count >= 3 { loops.append(loop) }
+            }
+
+            // 6. Process Loops into Classified Features
+            var featureId = 1
+            stockInfo.features.removeAll()
+            
+            for loopIndices in loops {
+                var pathPoints2D: [ToolpathPoint] = []
+                var loopMinX = Float.greatestFiniteMagnitude, loopMaxX = -Float.greatestFiniteMagnitude
+                var loopMinU = Float.greatestFiniteMagnitude, loopMaxU = -Float.greatestFiniteMagnitude
+                var loopMinV = Float.greatestFiniteMagnitude, loopMaxV = -Float.greatestFiniteMagnitude
+                
+                for idx in loopIndices {
+                    let pos = uniqueVertices[idx]
+                    let axial = dot(SIMD3<Float>(Float(pos.x), Float(pos.y), Float(pos.z)), normalizedAxis) - minX
+                    if axial < loopMinX { loopMinX = axial }; if axial > loopMaxX { loopMaxX = axial }
+                    
+                    let u = dot(SIMD3<Float>(Float(pos.x), Float(pos.y), Float(pos.z)), uVec) - centerU
+                    let vPos = dot(SIMD3<Float>(Float(pos.x), Float(pos.y), Float(pos.z)), vVec) - centerV
+                    if u < loopMinU { loopMinU = u }; if u > loopMaxU { loopMaxU = u }
+                    if vPos < loopMinV { loopMinV = vPos }; if vPos > loopMaxV { loopMaxV = vPos }
+                    
+                    var angle = atan2(Double(vPos), Double(u)) * 180.0 / .pi
+                    if angle < 0 { angle += 360.0 }
+                    
+                    pathPoints2D.append(ToolpathPoint(x: CGFloat(axial), a: CGFloat(angle)))
+                }
+                
+                let sortedAngles = pathPoints2D.map { $0.a }.sorted()
+                var maxGap: CGFloat = 0
+                for i in 0..<sortedAngles.count {
+                    var gap = sortedAngles[(i + 1) % sortedAngles.count] - sortedAngles[i]
+                    if gap < 0 { gap += 360.0 }
+                    if gap > maxGap { maxGap = gap }
+                }
+                let heightDeg = 360.0 - maxGap
+                
+                var aCenter = sortedAngles.first!
+                for i in 0..<sortedAngles.count {
+                    var gap = sortedAngles[(i + 1) % sortedAngles.count] - sortedAngles[i]
+                    if gap < 0 { gap += 360.0 }
+                    if gap == maxGap {
+                        aCenter = sortedAngles[(i + 1) % sortedAngles.count] + heightDeg / 2.0
+                        if aCenter >= 360.0 { aCenter -= 360.0 }
                         break
                     }
                 }
-                if assignedToGroup >= 0 { break }
-            }
-            
-            if assignedToGroup >= 0 {
-                groups[assignedToGroup].append(item)
-            } else {
-                groups.append([item])
+                
+                let xCenter = CGFloat(loopMinX + loopMaxX) / 2.0
+                let width = CGFloat(loopMaxX - loopMinX)
+                
+                // Replaces the non-linear unwrapped angle arc length calculation
+                let transverseWidth = CGFloat(max(loopMaxU - loopMinU, loopMaxV - loopMinV))
+                
+                let touchesStart = loopMinX <= 5.0
+                let touchesEnd = loopMaxX >= Float(tubeLength) - 5.0
+                let isFullProfile = heightDeg > 340.0
+                
+                var type: SurfaceFeatureType
+                let shape: FeatureShape = .rectangle
+                
+                if isFullProfile && touchesStart { type = .startCut }
+                else if isFullProfile && touchesEnd { type = .endCut }
+                else if touchesStart || touchesEnd { type = .notch }
+                else { type = .cutout }
+                
+                var unwrappedPath: [ToolpathPoint] = []
+                
+                if type == .startCut || type == .endCut {
+                    var profileDict: [Int: CGFloat] = [:]
+                    for pt in pathPoints2D {
+                        let deg = Int(round(pt.a)) % 360
+                        let currentX = profileDict[deg]
+                        if type == .startCut {
+                            profileDict[deg] = currentX == nil ? pt.x : max(currentX!, pt.x)
+                        } else {
+                            profileDict[deg] = currentX == nil ? pt.x : min(currentX!, pt.x)
+                        }
+                    }
+                    unwrappedPath = profileDict.keys.sorted().map { ToolpathPoint(x: profileDict[$0]!, a: CGFloat($0)) }
+                    if !unwrappedPath.isEmpty { unwrappedPath.append(ToolpathPoint(x: unwrappedPath[0].x, a: 360.0)) }
+                    
+                } else {
+                    unwrappedPath.append(pathPoints2D[0])
+                    for i in 1..<pathPoints2D.count {
+                        var currentA = pathPoints2D[i].a
+                        let prevA = unwrappedPath.last!.a
+                        while currentA - prevA > 180.0 { currentA -= 360.0 }
+                        while currentA - prevA < -180.0 { currentA += 360.0 }
+                        unwrappedPath.append(ToolpathPoint(x: pathPoints2D[i].x, a: currentA))
+                    }
+                    var firstA = pathPoints2D[0].a
+                    let lastA = unwrappedPath.last!.a
+                    while firstA - lastA > 180.0 { firstA -= 360.0 }
+                    while firstA - lastA < -180.0 { firstA += 360.0 }
+                    unwrappedPath.append(ToolpathPoint(x: pathPoints2D[0].x, a: firstA))
+                }
+                
+                var dimensions: [String: CGFloat] = ["width": width, "angle": heightDeg]
+                
+                // True generic hole check: Validates 3D physical width vs height without unwrapping errors
+                if type == .cutout && abs(width - transverseWidth) < 5.0 {
+                    type = .hole
+                    dimensions["diameter"] = width
+                }
+                
+                let feature = SurfaceFeature(id: featureId, type: type, shape: shape, xCenter: xCenter, aCenterDeg: aCenter, dimensions: dimensions, confidence: 1.0)
+                feature.path = unwrappedPath
+                stockInfo.features.append(feature)
+                featureId += 1
             }
         }
-        
-        return groups
-    }
+    
+        private static func groupFeatureVertices(_ vertices: [(vertex: SCNVector3, axialPos: CGFloat, angle: CGFloat)])
+        -> [[(vertex: SCNVector3, axialPos: CGFloat, angle: CGFloat)]] {
+            var groups: [[(vertex: SCNVector3, axialPos: CGFloat, angle: CGFloat)]] = []
+            
+            for item in vertices {
+                var assignedToGroup = -1
+                
+                for (groupIdx, group) in groups.enumerated() {
+                    for existing in group {
+                        let axialDist = abs(item.axialPos - existing.axialPos)
+                        let angleDist = min(abs(item.angle - existing.angle), 360 - abs(item.angle - existing.angle))
+                        
+                        // Group vertices that are close together (forms the perimeter of the cut)
+                        if axialDist < 15 && angleDist < 20 {
+                            assignedToGroup = groupIdx
+                            break
+                        }
+                    }
+                    if assignedToGroup >= 0 { break }
+                }
+                
+                if assignedToGroup >= 0 {
+                    groups[assignedToGroup].append(item)
+                } else {
+                    groups.append([item])
+                }
+            }
+            
+            return groups
+        }
+   
 }
 
 // MARK: - Helper Extensions
