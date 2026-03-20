@@ -8,11 +8,11 @@ struct GCodeSettings {
     var rapidRate: CGFloat = 3000.0      // mm/min - rapid travel
     
     // Heights
-    var safeHeight: CGFloat = 25.0       // mm - safe travel height (adjusted based on OD)
-    var cutHeight: CGFloat = 1.5         // mm - LEGACY: used for explicit Z paths if needed
+    var safeHeight: CGFloat = 25.0       // mm - safe travel height
+    var cutHeight: CGFloat = 1.5         // mm - LEGACY
     
-    // Kerf compensation
-    var kerfWidth: CGFloat = 2.0         // mm - typical plasma kerf
+    // Kerf compensation (Delegated to Controller or handled via CAM later)
+    var kerfWidth: CGFloat = 2.0
     var enableKerfComp: Bool = true
     
     // Lead-in & Relief Settings
@@ -21,13 +21,6 @@ struct GCodeSettings {
     
     // SimCNC-specific settings
     var useSimCNC: Bool = true           // Use SimCNC automatic pierce sequence (M3 S1)
-    var useLinearLeadIn: Bool = true     // true = straight line, false = arc
-}
-
-// MARK: - Toolpath Point
-struct ToolpathPoint {
-    var x: CGFloat
-    var a: CGFloat
 }
 
 // MARK: - GCode Generator
@@ -54,10 +47,7 @@ class GCodeGenerator {
         gcode.append("; === Cutting Pattern ===")
         
         // 3. Main Feature Loop (Data-Driven & Operation-Ordered)
-        // Order: Start Cut -> Internal Features (sorted by X) -> End Cut
         let sortedFeatures = stock.features.sorted { a, b in
-            
-            // Helper function to assign machining priority
             func priority(for type: SurfaceFeatureType) -> Int {
                 switch type {
                 case .startCut: return 0
@@ -70,29 +60,19 @@ class GCodeGenerator {
             let pB = priority(for: b.type)
             
             if pA != pB {
-                return pA < pB // Sort by operational priority first
+                return pA < pB
             } else {
-                return a.xCenter < b.xCenter // If same priority, sort by X position to minimize travel
+                return a.xCenter < b.xCenter
             }
         }
         
+        // 4. Trace the exact contours provided by OpenCASCADE
         for feature in sortedFeatures {
-            switch feature.type {
-            case .startCut:
-                gcode.append(contentsOf: generateStartCut(feature: feature, stock: stock))
-            case .endCut:
-                gcode.append(contentsOf: generateEndCut(feature: feature, stock: stock))
-            case .notch:
-                gcode.append(contentsOf: generateNotchCut(feature: feature, stock: stock))
-            case .hole, .cutout:
-                // Fallback to notch logic for basic cutouts right now,
-                // or you can build dedicated generateHoleCut() later!
-                gcode.append(contentsOf: generateNotchCut(feature: feature, stock: stock))
-            }
+            gcode.append(contentsOf: generateUniversalToolpath(feature: feature, stock: stock))
             gcode.append("") // Spacer between features
         }
         
-        // 4. Program End
+        // 5. Program End
         gcode.append("; === Program End ===")
         gcode.append("M5              ; torch off (redundant safety)")
         gcode.append("G0 Z\(String(format: "%.1f", settings.safeHeight))  ; retract to safe height")
@@ -103,37 +83,75 @@ class GCodeGenerator {
         return gcode.joined(separator: "\n")
     }
     
-    // MARK: - Feature Generators
+    // MARK: - Universal Path Generator
     
-    private func generateStartCut(feature: SurfaceFeature, stock: StockInfo) -> [String] {
+    /// Replaces all legacy hardcoded shapes. Traces the OCCT B-Rep directly.
+    private func generateUniversalToolpath(feature: SurfaceFeature, stock: StockInfo) -> [String] {
         var gcode: [String] = []
-        let path = feature.path
-        guard !path.isEmpty else { return [] }
+        guard let path = feature.path, path.count > 1 else { return gcode }
         
-        let firstPoint = path.first!
-        let startScrapX = firstPoint.x - settings.leadInDistance
+        // Calculate effective radius to convert A-axis degrees to physical mm for lead-in vector math
+        let effRadius = (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
         
-        gcode.append("; --- Feature: Start Profile (Miter/Square) ---")
-        gcode.append("G0 Z\(String(format: "%.1f", settings.safeHeight))")
+        // Determine inside/outside piercing strategy
+        let isInternal = (feature.type == .hole || feature.type == .cutout)
         
-        // Pierce in the scrap
-        gcode.append("G0 X\(String(format: "%.3f", startScrapX)) A\(String(format: "%.3f", firstPoint.a))")
-        gcode.append("M3 S1                         ; torch on")
+        let firstPt = path[0]
+        let secondPt = path[1]
         
-        // Lead-in to the first point
-        gcode.append("G1 X\(String(format: "%.3f", firstPoint.x)) A\(String(format: "%.3f", firstPoint.a)) F\(settings.feedRate)")
+        // Calculate pierce lead-in vector perpendicular to the first cut segment
+        let dx = secondPt.x - firstPt.x
+        let da_mm = (secondPt.a - firstPt.a) * .pi / 180.0 * effRadius
+        let len = sqrt(dx*dx + da_mm*da_mm)
         
-        // Trace the exact profile (handles saddles, miters, and square cuts natively)
-        for point in path {
-            gcode.append("G1 X\(String(format: "%.3f", point.x)) A\(String(format: "%.3f", point.a))")
+        var pierceX = firstPt.x - settings.leadInDistance
+        var pierceA = firstPt.a
+        
+        if len > 0.001 {
+            let dirX = dx / len
+            let dirA = da_mm / len
+            
+            // Rotate 90 degrees to point into the scrap material
+            let normX = isInternal ? -dirA : dirA
+            let normA_mm = isInternal ? dirX : -dirX
+            
+            pierceX = firstPt.x + normX * settings.leadInDistance
+            pierceA = firstPt.a + (normA_mm / effRadius * 180.0 / .pi)
         }
         
-        // Overburn to sever (repeat the first few degrees of the contour)
-        if path.count > 5 {
-            gcode.append("; Overburn tab")
-            for i in 1...min(5, path.count - 1) {
-                let overburnA = path[i].a + 360.0
-                gcode.append("G1 X\(String(format: "%.3f", path[i].x)) A\(String(format: "%.3f", overburnA))")
+        gcode.append("; --- Feature: \(feature.type.rawValue.capitalized) ---")
+        gcode.append("; Center: X=\(String(format: "%.1f", feature.xCenter)), A=\(String(format: "%.1f", feature.aCenterDeg))")
+        gcode.append("G0 Z\(String(format: "%.1f", settings.safeHeight))")
+        
+        // Move to pierce point
+        gcode.append("G0 X\(String(format: "%.3f", pierceX)) A\(String(format: "%.3f", pierceA))")
+        gcode.append("M3 S1                         ; torch on")
+        
+        // Lead-in
+        gcode.append("G1 X\(String(format: "%.3f", firstPt.x)) A\(String(format: "%.3f", firstPt.a)) F\(settings.feedRate)")
+        
+        // Trace the exact CAD boundary
+        for pt in path {
+            gcode.append("G1 X\(String(format: "%.3f", pt.x)) A\(String(format: "%.3f", pt.a))")
+        }
+        
+        // Overburn to completely sever the part (skip for open-edge notches)
+        if feature.type == .startCut || feature.type == .endCut || feature.type == .hole || feature.type == .cutout {
+            if path.count > 5 {
+                gcode.append("; Overburn tab")
+                let overburnCount = min(5, path.count - 1)
+                
+                for i in 1...overburnCount {
+                    var overburnA = path[i].a
+                    
+                    // If it's a full 360 rotation (Start/End cuts), continue rotating the A axis
+                    // forward rather than violently rewinding the chuck 360 degrees.
+                    if feature.type == .startCut || feature.type == .endCut {
+                        overburnA += 360.0
+                    }
+                    
+                    gcode.append("G1 X\(String(format: "%.3f", path[i].x)) A\(String(format: "%.3f", overburnA))")
+                }
             }
         }
         
@@ -141,139 +159,7 @@ class GCodeGenerator {
         return gcode
     }
     
-    private func generateEndCut(feature: SurfaceFeature, stock: StockInfo) -> [String] {
-        var gcode: [String] = []
-        let path = feature.path
-        guard !path.isEmpty else { return [] }
-        
-        let firstPoint = path.first!
-        let endScrapX = firstPoint.x + settings.leadInDistance
-        
-        gcode.append("; --- Feature: End Profile (Miter/Square) ---")
-        gcode.append("G0 Z\(String(format: "%.1f", settings.safeHeight))")
-        
-        // Pierce in the scrap
-        gcode.append("G0 X\(String(format: "%.3f", endScrapX)) A\(String(format: "%.3f", firstPoint.a))")
-        gcode.append("M3 S1                         ; torch on")
-        
-        // Lead-in to the first point
-        gcode.append("G1 X\(String(format: "%.3f", firstPoint.x)) A\(String(format: "%.3f", firstPoint.a)) F\(settings.feedRate)")
-        
-        // Trace the exact profile
-        for point in path {
-            gcode.append("G1 X\(String(format: "%.3f", point.x)) A\(String(format: "%.3f", point.a))")
-        }
-        
-        // Overburn to sever
-        if path.count > 5 {
-            gcode.append("; Overburn tab")
-            for i in 1...min(5, path.count - 1) {
-                let overburnA = path[i].a + 360.0
-                gcode.append("G1 X\(String(format: "%.3f", path[i].x)) A\(String(format: "%.3f", overburnA))")
-            }
-        }
-        
-        gcode.append("M5                            ; torch off")
-        return gcode
-    }
-    
-    private func generateNotchCut(feature: SurfaceFeature, stock: StockInfo) -> [String] {
-        var gcode: [String] = []
-        let radius = (stock.od ?? 50) / 2
-        
-        // Pull dimensions from the newly updated detection logic
-        let notchLengthX = feature.dimensions["width"] ?? 20.0
-        let notchAngleA = feature.dimensions["angle"] ?? 30.0
-        
-        // Internal kerf subtraction
-        let kerfOffset = settings.enableKerfComp ? settings.kerfWidth / 2 : 0
-        let startX = feature.xCenter - notchLengthX / 2 + kerfOffset
-        let startA = feature.aCenterDeg - notchAngleA / 2 + (kerfOffset / radius * 180.0 / .pi)
-        let endX = startX + notchLengthX - (kerfOffset * 2)
-        let endA = startA + notchAngleA - ((kerfOffset * 2) / radius * 180.0 / .pi)
-        
-        // Calculate lead-in based on the first vertical cut (Top edge going right)
-        let nextX = startX + (notchLengthX * 0.1)
-        let pierce = calculatePiercePoint(
-            startPoint: (x: startX, a: startA),
-            nextPoint: (x: nextX, a: startA),
-            radius: radius,
-            isInternalFeature: true
-        )
-        
-        gcode.append("; --- Feature: \(feature.type.rawValue.capitalized) at X=\(String(format: "%.1f", feature.xCenter)) ---")
-        gcode.append("G0 Z\(String(format: "%.1f", settings.safeHeight))")
-        
-        // Pierce in the scrap
-        gcode.append("G0 X\(String(format: "%.3f", pierce.x)) A\(String(format: "%.3f", pierce.a))")
-        gcode.append("M3 S1                         ; torch on")
-        
-        // Lead-in to the corner
-        gcode.append("G1 X\(String(format: "%.3f", startX)) A\(String(format: "%.3f", startA)) F\(settings.feedRate)")
-        
-        // To prevent faceted cuts on low-res controllers, we can break lines into points
-        let numPoints = 10
-        
-        // 1. Top edge (Moving along X)
-        for i in 1...numPoints {
-            let x = startX + CGFloat(i) * (endX - startX) / CGFloat(numPoints)
-            gcode.append("G1 X\(String(format: "%.3f", x)) A\(String(format: "%.3f", startA))")
-        }
-        
-        // 2. Right edge (Moving along A)
-        for i in 1...numPoints {
-            let a = startA + CGFloat(i) * (endA - startA) / CGFloat(numPoints)
-            gcode.append("G1 X\(String(format: "%.3f", endX)) A\(String(format: "%.3f", a))")
-        }
-        
-        // 3. Bottom edge (Moving back along X)
-        for i in 1...numPoints {
-            let x = endX - CGFloat(i) * (endX - startX) / CGFloat(numPoints)
-            gcode.append("G1 X\(String(format: "%.3f", x)) A\(String(format: "%.3f", endA))")
-        }
-        
-        // 4. Left edge (Moving back along A)
-        for i in 1...numPoints {
-            let a = endA - CGFloat(i) * (endA - startA) / CGFloat(numPoints)
-            gcode.append("G1 X\(String(format: "%.3f", startX)) A\(String(format: "%.3f", a))")
-        }
-        
-        // Slight overburn back into the top edge to sever
-        gcode.append("G1 X\(String(format: "%.3f", startX + 2.0)) A\(String(format: "%.3f", startA)) ; Overburn")
-        
-        gcode.append("M5                            ; torch off")
-        return gcode
-    }
-    
-    // MARK: - Helpers
-    
-    private func calculatePiercePoint(startPoint: (x: CGFloat, a: CGFloat), nextPoint: (x: CGFloat, a: CGFloat), radius: CGFloat, isInternalFeature: Bool) -> (x: CGFloat, a: CGFloat) {
-        // Simple linear lead-in calculation perpendicular to the first cut direction
-        let dx = nextPoint.x - startPoint.x
-        let da = (nextPoint.a - startPoint.a) * .pi / 180.0 * radius
-        
-        let length = sqrt(dx * dx + da * da)
-        guard length > 0 else {
-            // Fallback if points are identical
-            return (x: startPoint.x - settings.leadInDistance, a: startPoint.a)
-        }
-        
-        // Normalize direction vector
-        let dirX = dx / length
-        let dirA = da / length
-        
-        // Calculate perpendicular normal (pointing into the scrap)
-        // For internal features, we want the normal to point "inside" the cutout
-        let normalX = isInternalFeature ? -dirA : dirA
-        let normalA = isInternalFeature ? dirX : -dirX
-        
-        let pierceX = startPoint.x + normalX * settings.leadInDistance
-        
-        // Convert the arc length back to degrees for the A-axis
-        let pierceA = startPoint.a + (normalA * settings.leadInDistance / radius * 180.0 / .pi)
-        
-        return (x: pierceX, a: pierceA)
-    }
+    // MARK: - Header Generator
     
     private func generateHeader(stock: StockInfo) -> [String] {
         let formatter = DateFormatter()
@@ -283,10 +169,16 @@ class GCodeGenerator {
             "%",
             "O0001 (PROGRAM NAME: cylinder)",
             "(GENERATED: \(formatter.string(from: Date())))",
-            "(STOCK: \(stock.profile.rawValue))",
-            "(OD: \(String(format: "%.1f", stock.od ?? 0))mm)",
-            "(LENGTH: \(String(format: "%.1f", stock.length))mm)"
+            "(STOCK: \(stock.profile.rawValue))"
         ]
+        
+        if stock.profile == .round {
+            header.append("(OD: \(String(format: "%.1f", stock.od ?? 0))mm)")
+        } else {
+            header.append("(OD: \(String(format: "%.1f", stock.odX ?? 0))mm x \(String(format: "%.1f", stock.odY ?? 0))mm)")
+        }
+        
+        header.append("(LENGTH: \(String(format: "%.1f", stock.length))mm)")
         
         if stock.features.isEmpty {
             header.append("(FEATURES: none detected)")

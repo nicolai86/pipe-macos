@@ -131,78 +131,6 @@ struct SidePanelView: View {
                 Text("Model Info")
                     .font(.headline)
                 
-                if let model = viewModel.loadedModel {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Name: \(model.name)")
-                        Text("Vertices: \(model.vertexCount)")
-                        Text("Faces: \(model.faceCount)")
-                        
-                        if let stock = model.stockInfo {
-                            Divider()
-                            Text("Stock Classification")
-                                .font(.subheadline)
-                                .fontWeight(.semibold)
-                            
-                            Text("Profile: \(stock.profile.rawValue.uppercased())")
-                            
-                            if let od = stock.od {
-                                Text("OD: \(String(format: "%.1f", od)) mm")
-                            } else if let odX = stock.odX, let odY = stock.odY {
-                                Text("Dimensions: \(String(format: "%.1f", odX)) × \(String(format: "%.1f", odY)) mm")
-                            }
-                            
-                            Text("Length: \(String(format: "%.1f", stock.length)) mm")
-                            
-                            if let startCut = stock.startEndCut {
-                                Text("Start: \(startCut.type.rawValue)")
-                                if startCut.type == .miter {
-                                    Text("  Angle: \(String(format: "%.1f", startCut.miterAngleDeg))°")
-                                        .font(.caption2)
-                                }
-                            }
-                            
-                            if let endCut = stock.endEndCut {
-                                Text("End: \(endCut.type.rawValue)")
-                                if endCut.type == .miter {
-                                    Text("  Angle: \(String(format: "%.1f", endCut.miterAngleDeg))°")
-                                        .font(.caption2)
-                                }
-                            }
-                            
-                            if !stock.features.isEmpty {
-                                Divider()
-                                Text("Detected Features: \(stock.features.count)")
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                
-                                ForEach(stock.features, id: \.id) { feature in
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("  • \(feature.type.rawValue.capitalized) (\(feature.shape.rawValue))")
-                                            .font(.caption)
-                                        if let diameter = feature.dimensions["diameter"] {
-                                            Text("    Ø\(String(format: "%.1f", diameter)) mm")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                        } else if let width = feature.dimensions["width"], let height = feature.dimensions["height"] {
-                                            Text("    \(String(format: "%.1f", width)) × \(String(format: "%.1f", height)) mm")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                        }
-                                        Text("    X=\(String(format: "%.1f", feature.xCenter)) A=\(String(format: "%.0f", feature.aCenterDeg))°")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .font(.caption)
-                } else {
-                    Text("No model loaded")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
                 Divider()
                 
                 Text("Selected Shape")
@@ -212,7 +140,7 @@ struct SidePanelView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         ShapeInfoView(shape: selection)
                         
-                        if selection.isCuttable {
+                        if let shapeData = selection.shapeData, shapeData.isCuttable {
                             Button("Generate GCode (Selected Shape)") {
                                 viewModel.generateGCode(for: selection)
                             }
@@ -231,21 +159,22 @@ struct SidePanelView: View {
                         .foregroundColor(.secondary)
                 }
                 
-                // Always show full stock button if stock info available
-                if let model = viewModel.loadedModel, let stock = model.stockInfo {
+                // Show button to generate G-code for any selectable shape if available
+                if let shapes = viewModel.loadedModel?.selectableShapes, !shapes.isEmpty,
+                   viewModel.selectedShape == nil {
                     Divider()
                     
-                    Button("Generate GCode for Full Stock") {
-                        let selectedShape = SelectedShape(
-                            shapeType: stock.profile.rawValue,
-                            dimensions: nil,
-                            isCuttable: true,
-                            node: nil
-                        )
-                        viewModel.generateGCode(for: selectedShape)
+                    Text("Available Shapes")
+                        .font(.headline)
+                    
+                    ForEach(shapes) { shape in
+                        if let shapeData = shape.shapeData, shapeData.isCuttable {
+                            Button("Generate GCode for \(shapeData.type.rawValue)") {
+                                viewModel.generateGCode(for: shape)
+                            }
+                            .buttonStyle(.bordered)
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .help("Uses stock classification with feature detection")
                 }
                 
                 Spacer()
@@ -273,38 +202,47 @@ struct ShapeInfoView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Type: \(shape.shapeType)")
-            
-            dimensionText
-            
-            Text("Cuttable: \(shape.isCuttable ? "Yes" : "No")")
-                .foregroundColor(shape.isCuttable ? .green : .red)
+            if let shapeData = shape.shapeData {
+                Text("Type: \(shapeData.type.rawValue)")
+                
+                dimensionText(for: shapeData)
+                
+                Text("Cuttable: \(shapeData.isCuttable ? "Yes" : "No")")
+                    .foregroundColor(shapeData.isCuttable ? .green : .red)
+            } else {
+                Text("No shape data available")
+                    .foregroundColor(.secondary)
+            }
         }
     }
     
     @ViewBuilder
-    private var dimensionText: some View {
-        switch shape.shapeType {
-        case "cylinder":
-            if let dims = shape.dimensions as? CylinderDimensions {
+    private func dimensionText(for shapeData: ShapeData) -> some View {
+        switch shapeData.type {
+        case .cylinder:
+            if let anyCodable = shapeData.dimensions,
+               let dims = anyCodable.value as? CylinderDimensions {
                 Text("Diameter: \(String(format: "%.2f", dims.diameter)) mm")
                 Text("Height: \(String(format: "%.2f", dims.height)) mm")
             }
-        case "box":
-            if let dims = shape.dimensions as? BoxDimensions {
+        case .box:
+            if let anyCodable = shapeData.dimensions,
+               let dims = anyCodable.value as? BoxDimensions {
                 Text("Width: \(String(format: "%.2f", dims.width)) mm")
                 Text("Height: \(String(format: "%.2f", dims.height)) mm")
                 Text("Depth: \(String(format: "%.2f", dims.depth)) mm")
             }
-        default:
+        case .custom:
             EmptyView()
         }
     }
 }
 
-enum ViewMode: String, CaseIterable {
-    case wireframe = "Wireframe"
+// MARK: - View Mode
+enum ViewMode: String, CaseIterable, Identifiable {
     case solid = "Solid"
+    case wireframe = "Wireframe"
+    var id: String { self.rawValue }
 }
 
 class AppViewModel: ObservableObject {
@@ -325,13 +263,12 @@ class AppViewModel: ObservableObject {
             url.stopAccessingSecurityScopedResource()
         }
         
-        do {
-            let model = try ModelLoader.load(url: url)
+        if let model = ModelLoader.loadSTEP(url: url) {
             DispatchQueue.main.async {
                 self.loadedModel = model
             }
-        } catch {
-            print("Failed to load model: \(error)")
+        } else {
+            print("Failed to load model")
         }
     }
     
@@ -349,18 +286,13 @@ class AppViewModel: ObservableObject {
     func generateGCode(for shape: SelectedShape) {
         let generator = GCodeGenerator()
         
-        // Use the stockInfo from the shape if available
-        if let stockInfo = shape.stockInfo {
-            generatedGCode = generator.generateGCode(for: stockInfo)
-        } else if let model = loadedModel, let globalStock = model.stockInfo {
-            // Fallback to global stock info if shape doesn't have its own
-            generatedGCode = generator.generateGCode(for: globalStock)
-        } else {
-            print("No stock info available for G-code generation")
-            generatedGCode = nil
+        guard let stockInfo = shape.stockInfo else {
+            print("Cannot generate G-code: No stock information available")
+            return
         }
         
-        // Post notification to save
+        generatedGCode = generator.generateGCode(for: stockInfo)
+        
         NotificationCenter.default.post(name: .saveGCode, object: nil)
     }
     

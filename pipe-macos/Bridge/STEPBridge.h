@@ -50,36 +50,34 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+@interface EdgeData : NSObject
+@property (nonatomic, assign) int edgeID;
+@property (nonatomic, assign) int curveType; // 0=Line, 1=Circle, 2=Other
+@property (nonatomic, strong) NSArray<NSNumber *> *adjacentFaceIDs;
+@property (nonatomic, strong) NSArray<NSDictionary *> *points; // {x, y, z}
+- (instancetype)initWithEdgeID:(int)edgeID curveType:(int)curveType adjacentFaces:(NSArray<NSNumber *> *)adjFaces points:(NSArray<NSDictionary *> *)points;
+@end
+
 /// Wire boundary data from B-Rep face
 @interface WireData : NSObject
-
-@property (nonatomic, strong) NSArray<NSNumber *> *points;  // Flattened [x1,y1,z1,x2,y2,z2,...]
-@property (nonatomic, assign) BOOL isInner;  // Inner wire (cutout) vs outer wire (boundary)
-@property (nonatomic, assign) int edgeType;  // 0=Line, 1=Circle, 2=BSpline
-
-- (instancetype)initWithPoints:(NSArray<NSNumber *> *)points
-                        isInner:(BOOL)isInner
-                       edgeType:(int)edgeType;
-
+@property (nonatomic, assign) int wireID;
+@property (nonatomic, assign) BOOL isInner;
+@property (nonatomic, strong) NSArray<EdgeData *> *edges;
+- (instancetype)initWithWireID:(int)wireID isInner:(BOOL)isInner edges:(NSArray<EdgeData *> *)edges;
 @end
 
 /// Face data from B-Rep solid
 @interface FaceData : NSObject
-
-@property (nonatomic, assign) int surfaceType;  // 0=Plane, 1=Cylinder, 2=Cone, 3=Sphere, 4=Torus, 5=BSpline
+@property (nonatomic, assign) int faceID;
+@property (nonatomic, assign) int surfaceType;
 @property (nonatomic, strong, nullable) CylinderSurfaceData *cylinderData;
 @property (nonatomic, strong, nullable) PlaneSurfaceData *planeData;
 @property (nonatomic, strong) NSArray<WireData *> *wires;
+@property (nonatomic, strong) NSArray<NSDictionary *> *vertices; // For mesh visualization
+@property (nonatomic, strong) NSArray<NSArray<NSNumber *> *> *indices;
+@property (nonatomic, strong) NSArray<NSDictionary *> *normals;
 @property (nonatomic, assign) double area;
-
-@property (nonatomic, strong, nullable) NSArray<NSNumber *> *vertices;
-@property (nonatomic, strong, nullable) NSArray<NSNumber *> *indices;
-@property (nonatomic, strong, nullable) NSArray<NSNumber *> *normals;
-
-- (instancetype)initWithSurfaceType:(int)surfaceType
-                              wires:(NSArray<WireData *> *)wires
-                               area:(double)area;
-
+- (instancetype)initWithFaceID:(int)faceID type:(int)type cyl:(nullable CylinderSurfaceData *)cyl plane:(nullable PlaneSurfaceData *)plane wires:(NSArray<WireData *> *)wires verts:(NSArray *)verts idxs:(NSArray *)idxs norms:(NSArray *)norms area:(double)area;
 @end
 
 /// Solid body data from STEP assembly

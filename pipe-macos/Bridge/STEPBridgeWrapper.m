@@ -12,92 +12,64 @@
 
 + (nullable NSString *)parseSTEPToJSON:(NSURL *)url error:(NSError * _Nullable __autoreleasing * _Nullable)error {
     STEPParseResult *result = [STEPBridge parseSTEPFile:url error:error];
-    if (!result) {
-        return nil;
-    }
+    if (!result) return nil;
     
     NSMutableArray *solidsJSON = [NSMutableArray array];
     
     for (SolidData *solid in result.solids) {
         NSMutableDictionary *solidDict = [NSMutableDictionary dictionary];
         solidDict[@"solidId"] = @(solid.solidId);
-        
-        solidDict[@"boundingBox"] = @{
-            @"xMin": @(solid.xMin), @"yMin": @(solid.yMin), @"zMin": @(solid.zMin),
-            @"xMax": @(solid.xMax), @"yMax": @(solid.yMax), @"zMax": @(solid.zMax)
-        };
+        solidDict[@"boundingBox"] = @{ @"xMin": @(solid.xMin), @"yMin": @(solid.yMin), @"zMin": @(solid.zMin), @"xMax": @(solid.xMax), @"yMax": @(solid.yMax), @"zMax": @(solid.zMax) };
         
         NSMutableArray *facesJSON = [NSMutableArray array];
         for (FaceData *face in solid.faces) {
             NSMutableDictionary *faceDict = [NSMutableDictionary dictionary];
+            faceDict[@"faceID"] = @(face.faceID);
             faceDict[@"surface_type"] = [self surfaceTypeToString:face.surfaceType];
-            faceDict[@"area"] = @(face.area);
             
             if (face.cylinderData) {
-                faceDict[@"cylinder"] = @{
-                    @"radius": @(face.cylinderData.radius),
-                    @"location": @[
-                        @(face.cylinderData.locationX),
-                        @(face.cylinderData.locationY),
-                        @(face.cylinderData.locationZ)
-                    ],
-                    @"axis": @[
-                        @(face.cylinderData.axisX),
-                        @(face.cylinderData.axisY),
-                        @(face.cylinderData.axisZ)
-                    ]
+                faceDict[@"cylinder"] = @{ @"radius": @(face.cylinderData.radius), @"axisX": @(face.cylinderData.axisX), @"axisY": @(face.cylinderData.axisY), @"axisZ": @(face.cylinderData.axisZ) };
+            }
+            if (face.planeData) {
+                // FIX: Exposed Locations so Swift can compute distance from center
+                faceDict[@"plane"] = @{
+                    @"normalX": @(face.planeData.normalX), @"normalY": @(face.planeData.normalY), @"normalZ": @(face.planeData.normalZ),
+                    @"locationX": @(face.planeData.locationX), @"locationY": @(face.planeData.locationY), @"locationZ": @(face.planeData.locationZ)
                 };
             }
             
-            if (face.wires) {
-                NSMutableArray *wiresJSON = [NSMutableArray array];
-                for (WireData *wire in face.wires) {
-                    [wiresJSON addObject:@{
-                        @"points": wire.points,
-                        @"isInner": @(wire.isInner),
-                        @"edgeType": @(wire.edgeType)
+            NSMutableArray *wiresJSON = [NSMutableArray array];
+            for (WireData *wire in face.wires) {
+                NSMutableArray *edgesJSON = [NSMutableArray array];
+                for (EdgeData *edge in wire.edges) {
+                    [edgesJSON addObject:@{
+                        @"edgeID": @(edge.edgeID), @"curveType": @(edge.curveType),
+                        @"adjacentFaceIDs": edge.adjacentFaceIDs, @"points": edge.points
                     }];
                 }
-                faceDict[@"wires"] = wiresJSON;
+                [wiresJSON addObject:@{ @"wireID": @(wire.wireID), @"isInner": @(wire.isInner), @"edges": edgesJSON }];
             }
+            faceDict[@"wires"] = wiresJSON;
             
-            if (face.vertices && face.vertices.count > 0) {
-                faceDict[@"vertices"] = face.vertices;
-                faceDict[@"indices"] = face.indices;
-                if (face.normals && face.normals.count > 0) {
-                    faceDict[@"normals"] = face.normals;
-                }
-            }
+            if (face.vertices.count > 0) faceDict[@"vertices"] = face.vertices;
+            if (face.indices.count > 0) faceDict[@"indices"] = face.indices;
+            if (face.normals.count > 0) faceDict[@"normals"] = face.normals;
             
             [facesJSON addObject:faceDict];
         }
-        
         solidDict[@"faces"] = facesJSON;
         [solidsJSON addObject:solidDict];
     }
     
     NSDictionary *resultDict = @{@"solids": solidsJSON};
-    NSError *jsonError = nil;
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:resultDict options:0 error:&jsonError];
-    
-    if (jsonError) {
-        if (error) {
-            *error = jsonError;
-        }
-        return nil;
-    }
-    
-    return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:resultDict options:0 error:error];
+    return jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
 }
 
 + (NSString *)surfaceTypeToString:(int)type {
     switch (type) {
-        case 0: return @"PLANE";
-        case 1: return @"CYLINDER";
-        case 2: return @"CONE";
-        case 3: return @"SPHERE";
-        case 4: return @"TORUS";
-        default: return @"BSPLINE";
+        case 0: return @"PLANE"; case 1: return @"CYLINDER"; case 2: return @"CONE";
+        case 3: return @"SPHERE"; case 4: return @"TORUS"; default: return @"UNKNOWN";
     }
 }
 
