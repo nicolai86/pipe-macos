@@ -28,6 +28,7 @@ struct AdvancedSettings: Codable {
     // The Issue: You mentioned that IHS and drops to cut-height are delegated to SimCNC's M3 macro. But on HSS (square/rectangular) tubing, your offline TCP interpolation means the G-code is actively commanding constant Z-axis oscillation to track the flat faces and corners as the A-axis rotates. If SimCNC’s Torch Height Control (THC) is active, it will read arc voltage and try to adjust the Z-axis at the same time your G-code is commanding Z-moves. This creates a dual-loop control conflict that will cause the Z-axis to oscillate wildly or dive into the material. The Fix: * Dynamic THC Toggling: Pipe macOS needs to inject THC ON/OFF macros (or utilize SimCNC's specific anti-dive/corner-lock I/O signals) dynamically.
     //    Force THC OFF via G-code just before a corner radius where kinematic Z-acceleration is high, locking the Z-axis to your pre-calculated TCP trajectory. Turn THC back ON during the long, flat segments where Z-kinematics are stable and arc-voltage adjustments are actually needed to handle stock warping.
     var enableDynamicTHC: Bool = true
+    var enableDynamicSafeZ: Bool = true
     var enableThermalHedging: Bool = true
     var thermalHedgingWeightX: Double = 1.0
     var thermalHedgingWeightA: Double = 1.0
@@ -75,6 +76,7 @@ class CutPresetManager: ObservableObject {
         s.enableKerfComp      = advancedSettings.enableKerfComp
         s.useSimCNC           = advancedSettings.useSimCNC
         s.enableDynamicTHC       = advancedSettings.enableDynamicTHC
+        s.enableDynamicSafeZ     = advancedSettings.enableDynamicSafeZ
         s.enableThermalHedging   = advancedSettings.enableThermalHedging
         s.thermalHedgingWeightX  = CGFloat(advancedSettings.thermalHedgingWeightX)
         s.thermalHedgingWeightA  = CGFloat(advancedSettings.thermalHedgingWeightA)

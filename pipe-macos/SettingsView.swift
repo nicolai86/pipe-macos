@@ -200,6 +200,8 @@ struct SettingsView: View {
                         .onChange(of: manager.advancedSettings.useSimCNC) { _ in manager.saveAdvanced() }
                     Toggle("Enable Dynamic THC (corner lock)", isOn: $manager.advancedSettings.enableDynamicTHC)
                         .onChange(of: manager.advancedSettings.enableDynamicTHC) { _ in manager.saveAdvanced() }
+                    Toggle("Enable Dynamic Safe Z (asymmetric envelope)", isOn: $manager.advancedSettings.enableDynamicSafeZ)
+                        .onChange(of: manager.advancedSettings.enableDynamicSafeZ) { _ in manager.saveAdvanced() }
                 }
 
                 Section("Axis Acceleration Limits") {

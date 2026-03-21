@@ -30,6 +30,10 @@ struct GCodeSettings {
     var feedRate: CGFloat = 1000.0 // mm/min
     var rapidRate: CGFloat = 3000.0 // mm/min
     var safeHeight: CGFloat = 25.0 // mm
+    
+    // NEW: Asymmetric Z-Clearance Envelope
+    var enableDynamicSafeZ: Bool = true
+    
     var pierceHeight: CGFloat = 3.8 // mm — standoff during pierce, from Hypertherm cut charts
     var cutHeight: CGFloat = 3.2 // mm
     
@@ -90,7 +94,7 @@ class GCodeGenerator {
     func generateGCode(for stock: StockInfo, rollOffset: CGFloat = 0.0) -> String {
         var gcode: [String] = []
         gcode.append(contentsOf: generateHeader(stock: stock))
-        gcode.append(contentsOf: generateStartupSequence(totalLength: stock.length))
+        gcode.append(contentsOf: generateStartupSequence(totalLength: stock.length, stock: stock))
         
         var currentA: CGFloat = 0
         
@@ -130,7 +134,7 @@ class GCodeGenerator {
             }
         }
         
-        gcode.append(contentsOf: generateEndSequence())
+        gcode.append(contentsOf: generateEndSequence(stock: stock))
         return gcode.joined(separator: "\n")
     }
 
@@ -143,6 +147,8 @@ class GCodeGenerator {
         let totalLength = entries.max(by: { $0.packEndX < $1.packEndX })?.packEndX ?? 0
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy, HH:mm"
+
+        let safeZ = settings.enableDynamicSafeZ ? getDynamicSafeZ(stock: refStock) : settings.safeHeight
 
         var lines: [String] = [
             "%",
@@ -159,7 +165,7 @@ class GCodeGenerator {
             "G49             ; cancel tool length offset",
             "G92 X\(fmt(totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
             "",
-            "G0 Z\(fmt(settings.safeHeight))     ; move to safe height",
+            "G0 Z\(fmt(safeZ))     ; move to safe height",
             "M5              ; torch off (ensure)",
             "",
             "; === Cutting Pattern (free-end to chuck, \(entries.count) piece\(entries.count == 1 ? "" : "s")) ===",
@@ -230,7 +236,7 @@ class GCodeGenerator {
             }
         }
 
-        lines += generateEndSequence()
+        lines += generateEndSequence(stock: refStock)
         return lines.joined(separator: "\n")
     }
     
@@ -608,8 +614,11 @@ class GCodeGenerator {
         lines.append("; TCP Active | Swirl Comp: \(directionStr) | Tangential OB | Comp: \(compCode)")
         
         let pierceMp = machinePoints[0]
-        lines.append("G0 X\(fmt(pierceMp.Xm)) Y\(fmt(pierceMp.Ym)) A\(fmt(pierceMp.Am))")
-        lines.append("G0 Z\(fmt(pierceMp.Zm + settings.safeHeight))  ; safe height")
+        let dynamicSafeZ = settings.enableDynamicSafeZ ? getDynamicSafeZ(stock: stock) : (pierceMp.Zm + settings.safeHeight)
+        
+        // Retract strictly BEFORE moving X, Y, A to avoid diagonal collisions during A-axis corner swings
+        lines.append("G0 Z\(fmt(dynamicSafeZ))  ; retract to asymmetric safe Z envelope")
+        lines.append("G0 X\(fmt(pierceMp.Xm)) Y\(fmt(pierceMp.Ym)) A\(fmt(pierceMp.Am)) ; rapid to pierce location")
         lines.append("G0 Z\(fmt(pierceMp.Zm + settings.pierceHeight)) ; lower to pierce height")
         lines.append("M3 S1                         ; torch on")
 
@@ -617,10 +626,10 @@ class GCodeGenerator {
         var currentTHCState = true
         if settings.enableDynamicTHC {
             if pierceMp.isCorner {
-                lines.append("#1060=0 M220                  ; THC OFF (Corner Lock)")
+                lines.append("M220                  ; THC OFF (Corner Lock)")
                 currentTHCState = false
             } else {
-                lines.append("#1060=1 M220                  ; THC ON (Flat Segment)")
+                lines.append("M221                  ; THC ON (Flat Segment)")
             }
         }
 
@@ -632,10 +641,10 @@ class GCodeGenerator {
             // Apply Dynamic THC Control
             if settings.enableDynamicTHC {
                 if curr.isCorner && currentTHCState {
-                    lines.append("#1060=0 M220                  ; THC OFF (Corner Lock)")
+                    lines.append("M220                  ; THC OFF (Corner Lock)")
                     currentTHCState = false
                 } else if !curr.isCorner && !currentTHCState {
-                    lines.append("#1060=1 M220                  ; THC ON (Flat Segment)")
+                    lines.append("M221                  ; THC ON (Flat Segment)")
                     currentTHCState = true
                 }
             }
@@ -653,11 +662,38 @@ class GCodeGenerator {
         // Torch Off and G40 Cancel
         let g40Cancel = settings.enableKerfComp ? "G40 " : ""
         lines.append("M5 \(g40Cancel)                         ; torch off & cancel kerf comp")
+        lines.append("G0 Z\(fmt(dynamicSafeZ))  ; retract to asymmetric safe Z envelope before next move")
         return (lines, machinePoints.last!.Am)
     }
 
     // MARK: - Mathematical Core: HSS Kinematic Mapping
     
+    /// Dynamically calculates the true circumscribed bounding radius needed to clear all corners
+    /// while rapidly moving the A axis, avoiding diagonal tube crashes.
+    private func getDynamicSafeZ(stock: StockInfo) -> CGFloat {
+        let baselineZ: CGFloat
+        let maxRadius: CGFloat
+        
+        if stock.profile == .round {
+            baselineZ = (stock.od ?? 50.0) / 2.0
+            maxRadius = baselineZ
+        } else {
+            let W = stock.odX ?? stock.od ?? 50.0
+            let H = stock.odY ?? stock.od ?? 50.0
+            baselineZ = H / 2.0
+            
+            let R = min(W, H) * 0.1 // Standardized 10% corner radius
+            let wHalf = W / 2.0
+            let hHalf = H / 2.0
+            
+            // True geometric circumscribed envelope
+            maxRadius = sqrt(pow(wHalf - R, 2) + pow(hHalf - R, 2)) + R
+        }
+        
+        let extraClearance = max(0, maxRadius - baselineZ)
+        return settings.safeHeight + extraClearance
+    }
+
     private func getProfilePoint(angleDeg: CGFloat, stock: StockInfo) -> (u: CGFloat, v: CGFloat, Nu: CGFloat, Nv: CGFloat) {
         if stock.profile == .round {
             let r = (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
@@ -794,7 +830,8 @@ class GCodeGenerator {
         return header
     }
 
-    private func generateStartupSequence(totalLength: CGFloat, packMode: Bool = false, count: Int = 1) -> [String] {
+    private func generateStartupSequence(totalLength: CGFloat, stock: StockInfo, packMode: Bool = false, count: Int = 1) -> [String] {
+        let safeZ = settings.enableDynamicSafeZ ? getDynamicSafeZ(stock: stock) : settings.safeHeight
         return [
             "G21             ; metric mode",
             "G90             ; absolute positioning",
@@ -802,18 +839,19 @@ class GCodeGenerator {
             "G49             ; cancel tool length offset",
             "G92 X\(fmt(totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
             "",
-            "G0 Z\(fmt(settings.safeHeight))     ; move to safe height",
+            "G0 Z\(fmt(safeZ))     ; move to safe height",
             "M5              ; torch off (ensure)",
             "",
             packMode ? "; === Cutting Pattern (right-to-left, \(count) piece\(count == 1 ? "" : "s")) ===" : "; === Cutting Pattern ==="
         ]
     }
 
-    private func generateEndSequence() -> [String] {
+    private func generateEndSequence(stock: StockInfo?) -> [String] {
+        let safeZ = (settings.enableDynamicSafeZ && stock != nil) ? getDynamicSafeZ(stock: stock!) : settings.safeHeight
         return [
             "; === Program End ===",
             "M5              ; torch off (redundant safety)",
-            "G0 Z\(fmt(settings.safeHeight))  ; retract to safe height",
+            "G0 Z\(fmt(safeZ))  ; retract to safe height",
             "G0 X0 Y0 A0     ; return to home (TCP centered)",
             "M30             ; end of program",
             "%"
