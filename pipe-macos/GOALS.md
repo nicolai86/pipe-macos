@@ -30,8 +30,15 @@ Smart Packing Workspace: Upon selecting a target stock profile, the software aut
 
 Dynamic Nesting: The Pack View acts as the absolute source of truth for G-Code generation. Users can seamlessly add, remove, or modify part quantities, with all changes instantly reflected in the 3D packing model.
 
- Dual-Loop THC Conflict Management (The Square Tube Problem): 
+Dual-Loop THC Conflict Management (The Square Tube Problem): 
     Disable THC for the rotation of HSS tubes so that the system avoids jittering the torch into the workpiece
+    
+Thermal Distortion Hedging (Global Cut Sequencing): 
+    Global Pooling: Instead of iterating piece-by-piece, it pools every internal feature (holes, cutouts, notches) across the entire pack.
+
+Greedy Distance Maximization (TSP Variant): It starts at the furthest free end (+X), then continually searches the remaining pool for the feature that is furthest away in both X-distance and A-axis rotational arc distance. This forces the torch to naturally ping-pong between the extremes, skipping across faces and distributing the thermal energy globally.
+
+Safe Severing: After all internal features across the 20-foot tube are cut, it pools all sever cuts (startCut, endCut) and strictly executes them from right to left (highest X to lowest X). This ensures pieces drop off the free end safely without detaching the main tube from the chuck prematurely.
 
 ## Advanced Rotary Kinematics Engine (2026 SOTA)
 Because standard controllers like SimCNC do not natively support Inverse Time Feedrate (G93) or true Tool Center Point (TCP) for rotary axes, Pipe macOS handles all advanced trajectory planning offline:

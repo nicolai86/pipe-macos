@@ -12,6 +12,19 @@ struct PackEntry {
     var packEndX: CGFloat { packStartX + (shape.stockInfo?.length ?? 0) }
 }
 
+// MARK: - Global Feature (Thermal Hedging)
+struct GlobalFeature {
+    let feature: SurfaceFeature
+    let stock: StockInfo
+    let packStartX: CGFloat
+    let packEndX: CGFloat
+    let rollOffset: CGFloat
+    let pieceIndex: Int
+    
+    var globalX: CGFloat { packStartX + feature.xCenter }
+    var globalA: CGFloat { feature.aCenterDeg + rollOffset }
+}
+
 // MARK: - GCode Generation Settings
 struct GCodeSettings {
     var feedRate: CGFloat = 1000.0 // mm/min
@@ -38,6 +51,11 @@ struct GCodeSettings {
     var maxAccelY: CGFloat = 500.0
     var maxAccelZ: CGFloat = 300.0
     var maxAccelA: CGFloat = 1000.0
+    
+    // Global Thermal Sequencing
+    var enableThermalHedging: Bool = true
+    var thermalHedgingWeightX: CGFloat = 1.0
+    var thermalHedgingWeightA: CGFloat = 1.0
 }
 
 // MARK: - Machine TCP Data Structure
@@ -74,18 +92,42 @@ class GCodeGenerator {
         gcode.append(contentsOf: generateHeader(stock: stock))
         gcode.append(contentsOf: generateStartupSequence(totalLength: stock.length))
         
-        let sortedFeatures = sortFeatures(stock.features)
         var currentA: CGFloat = 0
         
-        for feature in sortedFeatures {
-            let (toolpath, finalA) = generateTCPToolpath(
-                feature: feature, stock: stock,
-                packStartX: 0, packEndX: stock.length,
-                rollOffset: rollOffset, currentA: currentA, isPackMode: false
-            )
-            gcode.append(contentsOf: toolpath)
-            gcode.append("")
-            currentA = finalA
+        if settings.enableThermalHedging {
+            let radius = stock.profile == .round ? (stock.od ?? 50.0)/2.0 : max(stock.odX ?? 50.0, stock.odY ?? 50.0)/2.0
+            let allFeatures = stock.features.map { GlobalFeature(feature: $0, stock: stock, packStartX: 0, packEndX: stock.length, rollOffset: rollOffset, pieceIndex: 0) }
+            
+            var internals = allFeatures.filter { $0.feature.type == .hole || $0.feature.type == .cutout || $0.feature.type == .notch }
+            var severs = allFeatures.filter { $0.feature.type == .startCut || $0.feature.type == .endCut }
+            
+            internals = sequenceForThermalHedging(features: internals, radius: radius)
+            // Execute severs right-to-left
+            severs.sort { $0.globalX > $1.globalX }
+            
+            let finalSequence = internals + severs
+            for gf in finalSequence {
+                let (toolpath, finalA) = generateTCPToolpath(
+                    feature: gf.feature, stock: gf.stock,
+                    packStartX: gf.packStartX, packEndX: gf.packEndX,
+                    rollOffset: gf.rollOffset, currentA: currentA, isPackMode: false
+                )
+                gcode.append(contentsOf: toolpath)
+                gcode.append("")
+                currentA = finalA
+            }
+        } else {
+            let sortedFeatures = sortFeatures(stock.features)
+            for feature in sortedFeatures {
+                let (toolpath, finalA) = generateTCPToolpath(
+                    feature: feature, stock: stock,
+                    packStartX: 0, packEndX: stock.length,
+                    rollOffset: rollOffset, currentA: currentA, isPackMode: false
+                )
+                gcode.append(contentsOf: toolpath)
+                gcode.append("")
+                currentA = finalA
+            }
         }
         
         gcode.append(contentsOf: generateEndSequence())
@@ -123,35 +165,111 @@ class GCodeGenerator {
             "; === Cutting Pattern (free-end to chuck, \(entries.count) piece\(entries.count == 1 ? "" : "s")) ===",
         ]
 
-        let ordered = entries.sorted { $0.packStartX > $1.packStartX }
         var currentA: CGFloat = 0
 
-        for (pieceIdx, entry) in ordered.enumerated() {
-            guard let stock = entry.shape.stockInfo else { continue }
-            lines += [
-                "",
-                "; ┌── Piece \(pieceIdx + 1)/\(ordered.count)  "
-                    + "X=\(fmt(entry.packStartX))–\(fmt(entry.packEndX))mm  "
-                    + "L=\(fmt(stock.length))mm  "
-                    + "\(stock.features.count) feature\(stock.features.count == 1 ? "" : "s") ──",
-            ]
-
-            let sortedFeatures = sortFeatures(stock.features)
-
-            for feature in sortedFeatures {
+        if settings.enableThermalHedging {
+            lines.append("; === Thermal Hedging Enabled: Global Cut Sequencing ===")
+            var allFeatures: [GlobalFeature] = []
+            
+            for (idx, entry) in entries.enumerated() {
+                guard let stock = entry.shape.stockInfo else { continue }
+                for f in stock.features {
+                    allFeatures.append(GlobalFeature(feature: f, stock: stock, packStartX: entry.packStartX, packEndX: entry.packEndX, rollOffset: entry.rollOffset, pieceIndex: idx))
+                }
+            }
+            
+            var internals = allFeatures.filter { $0.feature.type == .hole || $0.feature.type == .cutout || $0.feature.type == .notch }
+            var severs = allFeatures.filter { $0.feature.type == .startCut || $0.feature.type == .endCut }
+            
+            let radius: CGFloat = refStock.profile == .round ? (refStock.od ?? 50.0)/2.0 : max(refStock.odX ?? 50.0, refStock.odY ?? 50.0)/2.0
+            
+            // Apply global greedy dispersion to internal features
+            internals = sequenceForThermalHedging(features: internals, radius: radius)
+            
+            // Sever cuts MUST execute from the free end to the chuck (Highest X to Lowest X) to safely drop pieces
+            severs.sort { $0.globalX > $1.globalX }
+            
+            let finalSequence = internals + severs
+            
+            for gf in finalSequence {
+                lines.append("; ┌── Piece \(gf.pieceIndex + 1)/\(entries.count) | Feature: \(gf.feature.type.rawValue) at Global X=\(fmt(gf.globalX)) ──")
                 let (toolpath, finalA) = generateTCPToolpath(
-                    feature: feature, stock: stock,
-                    packStartX: entry.packStartX, packEndX: entry.packEndX,
-                    rollOffset: entry.rollOffset, currentA: currentA, isPackMode: true
+                    feature: gf.feature, stock: gf.stock,
+                    packStartX: gf.packStartX, packEndX: gf.packEndX,
+                    rollOffset: gf.rollOffset, currentA: currentA, isPackMode: true
                 )
                 lines += toolpath
                 lines.append("")
                 currentA = finalA
             }
+            
+        } else {
+            let ordered = entries.sorted { $0.packStartX > $1.packStartX }
+            for (pieceIdx, entry) in ordered.enumerated() {
+                guard let stock = entry.shape.stockInfo else { continue }
+                lines += [
+                    "",
+                    "; ┌── Piece \(pieceIdx + 1)/\(ordered.count)  "
+                        + "X=\(fmt(entry.packStartX))–\(fmt(entry.packEndX))mm  "
+                        + "L=\(fmt(stock.length))mm  "
+                        + "\(stock.features.count) feature\(stock.features.count == 1 ? "" : "s") ──",
+                ]
+
+                let sortedFeatures = sortFeatures(stock.features)
+
+                for feature in sortedFeatures {
+                    let (toolpath, finalA) = generateTCPToolpath(
+                        feature: feature, stock: stock,
+                        packStartX: entry.packStartX, packEndX: entry.packEndX,
+                        rollOffset: entry.rollOffset, currentA: currentA, isPackMode: true
+                    )
+                    lines += toolpath
+                    lines.append("")
+                    currentA = finalA
+                }
+            }
         }
 
         lines += generateEndSequence()
         return lines.joined(separator: "\n")
+    }
+    
+    // MARK: - Thermal Hedging Algorithm
+    
+    private func sequenceForThermalHedging(features: [GlobalFeature], radius: CGFloat) -> [GlobalFeature] {
+        guard !features.isEmpty else { return [] }
+        var remaining = features
+        var sequenced: [GlobalFeature] = []
+        
+        // Start with the feature furthest to the right (+X) nearest the free end
+        remaining.sort { $0.globalX > $1.globalX }
+        var current = remaining.removeFirst()
+        sequenced.append(current)
+        
+        while !remaining.isEmpty {
+            // Find the feature furthest from the current feature to maximize heat distribution
+            if let nextIdx = remaining.indices.max(by: { i, j in
+                let distI = thermalDistance(current, remaining[i], radius: radius)
+                let distJ = thermalDistance(current, remaining[j], radius: radius)
+                return distI < distJ
+            }) {
+                current = remaining.remove(at: nextIdx)
+                sequenced.append(current)
+            }
+        }
+        return sequenced
+    }
+
+    private func thermalDistance(_ f1: GlobalFeature, _ f2: GlobalFeature, radius: CGFloat) -> CGFloat {
+        let dx = (f1.globalX - f2.globalX) * settings.thermalHedgingWeightX
+        
+        // Calculate shortest angular path on the cylinder surface
+        var da = abs(f1.globalA.truncatingRemainder(dividingBy: 360.0) - f2.globalA.truncatingRemainder(dividingBy: 360.0))
+        if da > 180.0 { da = 360.0 - da }
+        
+        let arcLen = (da * .pi / 180.0 * radius) * settings.thermalHedgingWeightA
+        
+        return sqrt(dx*dx + arcLen*arcLen)
     }
 
     // MARK: - State of the Art Offline TCP Generation

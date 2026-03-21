@@ -182,6 +182,17 @@ struct SettingsView: View {
                     advancedField("Overburn", unit: "°", value: $manager.advancedSettings.overburnDegrees)
                 }
 
+                Section("Thermal Hedging") {
+                    Toggle("Enable Thermal Hedging", isOn: $manager.advancedSettings.enableThermalHedging)
+                        .onChange(of: manager.advancedSettings.enableThermalHedging) { _ in manager.saveAdvanced() }
+                    advancedField("X Weight", unit: "×", value: $manager.advancedSettings.thermalHedgingWeightX)
+                        .disabled(!manager.advancedSettings.enableThermalHedging)
+                        .foregroundColor(manager.advancedSettings.enableThermalHedging ? .primary : .secondary)
+                    advancedField("A Weight", unit: "×", value: $manager.advancedSettings.thermalHedgingWeightA)
+                        .disabled(!manager.advancedSettings.enableThermalHedging)
+                        .foregroundColor(manager.advancedSettings.enableThermalHedging ? .primary : .secondary)
+                }
+
                 Section("Compensation") {
                     Toggle("Enable Kerf Compensation", isOn: $manager.advancedSettings.enableKerfComp)
                         .onChange(of: manager.advancedSettings.enableKerfComp) { _ in manager.saveAdvanced() }
