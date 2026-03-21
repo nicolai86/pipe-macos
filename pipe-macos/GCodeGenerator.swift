@@ -4,8 +4,11 @@ import SceneKit
 // MARK: - Pack Entry
 struct PackEntry {
     let shape: SelectedShape
+    /// X coordinate of the piece's low-X end in pack space (mm).
     let packStartX: CGFloat
-    var rollOffset: CGFloat = 0.0 // Degrees to shift A axis to align with top dead center
+    /// Degrees to add to all A angles so that A=0 aligns with the roll-corrected "up" face.
+    let rollOffset: CGFloat
+    /// X coordinate of the piece's high-X end in pack space (mm).
     var packEndX: CGFloat { packStartX + (shape.stockInfo?.length ?? 0) }
 }
 
@@ -37,10 +40,7 @@ class GCodeGenerator {
         // Features are sorted Right-to-Left (Outermost to Chuck)
         let sortedFeatures = sortFeatures(stock.features)
         for feature in sortedFeatures {
-            gcode.append(contentsOf: generateFeatureToolpath(
-                feature: feature, stock: stock,
-                packStartX: 0.0, packEndX: stock.length, rollOffset: rollOffset
-            ))
+            gcode.append(contentsOf: generateUniversalToolpath(feature: feature, stock: stock, rollOffset: rollOffset))
             gcode.append("")
         }
         
@@ -48,7 +48,68 @@ class GCodeGenerator {
         return gcode.joined(separator: "\n")
     }
     
-    // MARK: - Pack Generation
+    /// Replaces all legacy hardcoded shapes. Traces the OCCT B-Rep directly.
+    private func generateUniversalToolpath(feature: SurfaceFeature, stock: StockInfo, rollOffset: CGFloat = 0) -> [String] {
+        var gcode: [String] = []
+        guard let rawPath = feature.path, rawPath.count > 1 else { return gcode }
+
+        // Apply roll offset so A=0 aligns with the physical "up" face
+        let path = rawPath.map { ToolpathPoint(x: $0.x, a: $0.a + rollOffset) }
+
+        let effRadius = (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
+        let isInternal = (feature.type == .hole || feature.type == .cutout)
+
+        let firstPt = path[0]
+        let secondPt = path[1]
+
+        let dx = secondPt.x - firstPt.x
+        let da_mm = (secondPt.a - firstPt.a) * .pi / 180.0 * effRadius
+        let len = sqrt(dx*dx + da_mm*da_mm)
+
+        var pierceX = firstPt.x - settings.leadInDistance
+        var pierceA = firstPt.a
+
+        if len > 0.001 {
+            let dirX = dx / len
+            let dirA = da_mm / len
+            let normX = isInternal ? -dirA : dirA
+            let normA_mm = isInternal ? dirX : -dirX
+            pierceX = firstPt.x + normX * settings.leadInDistance
+            pierceA = firstPt.a + (normA_mm / effRadius * 180.0 / .pi)
+        }
+
+        gcode.append("; --- Feature: \(feature.type.rawValue.capitalized) ---")
+        gcode.append("; Center: X=\(String(format: "%.1f", feature.xCenter)), A=\(String(format: "%.1f", feature.aCenterDeg + rollOffset))")
+        gcode.append("G0 Z\(String(format: "%.1f", settings.safeHeight))")
+        gcode.append("G0 X\(String(format: "%.3f", pierceX)) A\(String(format: "%.3f", pierceA))")
+        gcode.append("M3 S1                         ; torch on")
+        gcode.append("G1 X\(String(format: "%.3f", firstPt.x)) A\(String(format: "%.3f", firstPt.a)) F\(settings.feedRate)")
+
+        for pt in path {
+            gcode.append("G1 X\(String(format: "%.3f", pt.x)) A\(String(format: "%.3f", pt.a))")
+        }
+
+        // Overburn: just overburnDegrees past the closing point — not multiple path points
+        if feature.type == .startCut || feature.type == .endCut {
+            let lastPt = path.last!
+            gcode.append("; Overburn \(String(format: "%.0f", settings.overburnDegrees))°")
+            gcode.append("G1 X\(String(format: "%.3f", lastPt.x)) A\(String(format: "%.3f", lastPt.a + settings.overburnDegrees))")
+        } else if (feature.type == .hole || feature.type == .cutout) && path.count > 1 {
+            let dir: CGFloat = (path[1].a - path[0].a) >= 0 ? 1 : -1
+            let lastPt = path.last!
+            gcode.append("; Overburn tab")
+            gcode.append("G1 X\(String(format: "%.3f", lastPt.x)) A\(String(format: "%.3f", lastPt.a + dir * settings.overburnDegrees))")
+        }
+
+        gcode.append("M5                            ; torch off")
+        return gcode
+    }
+
+    // MARK: - Pack G-code Generation
+
+    /// Generate a single G-code program for all pieces in the pack, cut right-to-left.
+    /// A-axis is continuous across pieces — no reset between pieces.
+    /// Lead-ins are placed in scrap zones only — never in remaining workpiece material.
     func generatePackGCode(entries: [PackEntry]) -> String {
         guard !entries.isEmpty, let refStock = entries[0].shape.stockInfo else {
             return "; Empty pack — no G-code generated"
@@ -66,14 +127,25 @@ class GCodeGenerator {
                 ? "(STOCK: \(refStock.profile.rawValue)  OD \(String(format: "%.1f", refStock.od ?? 0))mm)"
                 : "(STOCK: \(refStock.profile.rawValue)  \(String(format: "%.1f", refStock.odX ?? 0))×\(String(format: "%.1f", refStock.odY ?? 0))mm)",
             "(TOTAL STOCK LENGTH: \(String(format: "%.1f", totalLength))mm)",
-            ""
+            "",
+            "G21             ; metric mode",
+            "G90             ; absolute positioning",
+            "G40             ; cancel cutter comp",
+            "G49             ; cancel tool length offset",
+            "G92 X\(String(format: "%.3f", totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
+            "",
+            "G0 Z\(String(format: "%.1f", settings.safeHeight))     ; move to safe height",
+            "M5              ; torch off (ensure)",
+            "",
+            "; === Cutting Pattern (free-end to chuck, \(entries.count) piece\(entries.count == 1 ? "" : "s")) ===",
         ]
-        
-        // Pass the total pack length to the startup sequence
-        lines.append(contentsOf: generateStartupSequence(totalLength: totalLength, packMode: true, count: entries.count))
 
-        // Process pieces Right-to-Left (highest X first)
+        // Process pieces right-to-left (highest packStartX first = longest piece first)
         let ordered = entries.sorted { $0.packStartX > $1.packStartX }
+
+        // Thread currentA across ALL features in the program to minimise A-axis travel
+        var currentA: CGFloat = 0
+
         for (pieceIdx, entry) in ordered.enumerated() {
             guard let stock = entry.shape.stockInfo else { continue }
             lines += [
@@ -84,122 +156,121 @@ class GCodeGenerator {
                     + "\(stock.features.count) feature\(stock.features.count == 1 ? "" : "s") ──",
             ]
 
-            // Within each piece, process features Right-to-Left
-            let sortedFeatures = sortFeatures(stock.features)
+            // Cut order per piece: trim far end first, then holes/cutouts, sever from remaining
+            // stock last — keeps the piece supported until all features are done.
+            let sortedFeatures = stock.features.sorted { a, b in
+                func priority(_ t: SurfaceFeatureType) -> Int {
+                    switch t {
+                    case .endCut:                return 0  // far end (free-end side) — trim first
+                    case .hole, .cutout, .notch: return 1  // interior features
+                    case .startCut:              return 2  // chuck-end sever — last, so piece doesn't drop early
+                    }
+                }
+                let pA = priority(a.type), pB = priority(b.type)
+                return pA != pB ? pA < pB : a.xCenter > b.xCenter  // same priority → higher X first
+            }
+
             for feature in sortedFeatures {
-                lines += generateFeatureToolpath(
+                let (toolpath, finalA) = generatePackFeatureToolpath(
                     feature: feature, stock: stock,
-                    packStartX: entry.packStartX, packEndX: entry.packEndX, rollOffset: entry.rollOffset
+                    packStartX: entry.packStartX, packEndX: entry.packEndX,
+                    rollOffset: entry.rollOffset, currentA: currentA
                 )
+                lines += toolpath
                 lines.append("")
+                currentA = finalA
             }
         }
 
-        lines.append(contentsOf: generateEndSequence())
+        lines += [
+            "; === Program End ===",
+            "M5              ; torch off (redundant safety)",
+            "G0 Z\(String(format: "%.1f", settings.safeHeight))  ; retract to safe height",
+            "G0 X0 A0        ; return to home",
+            "M30             ; end of program",
+            "%",
+        ]
         return lines.joined(separator: "\n")
     }
 
-    // MARK: - Core Feature Toolpath
-    private func generateFeatureToolpath(
-        feature: SurfaceFeature, stock: StockInfo,
-        packStartX: CGFloat, packEndX: CGFloat, rollOffset: CGFloat
-    ) -> [String] {
-        guard let localPath = feature.path, localPath.count > 1 else { return [] }
+    // MARK: - Pack Feature Toolpath
+
+    /// Returns (toolpath lines, finalA) where finalA is the A position after this feature
+    /// (including overburn), so the next feature can minimise A-axis travel.
+    private func generatePackFeatureToolpath(
+        feature: SurfaceFeature,
+        stock: StockInfo,
+        packStartX: CGFloat,
+        packEndX: CGFloat,
+        rollOffset: CGFloat,
+        currentA: CGFloat
+    ) -> ([String], CGFloat) {
+        guard let localPath = feature.path, localPath.count > 1 else { return ([], currentA) }
 
         let effRadius = (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
-        let isClosed = (feature.type == .startCut || feature.type == .endCut || feature.type == .hole || feature.type == .cutout)
 
-        // 1. Apply roll offset and return to top dead center (A=0)
-        var shiftedPath = localPath.map { ToolpathPoint(x: $0.x, a: $0.a + rollOffset) }
-        
-        if isClosed {
-            shiftedPath = optimizePathStart(path: shiftedPath, targetA: 0.0)
-        } else {
-            shiftedPath = unwrapPathNear(path: shiftedPath, targetA: 0.0)
-        }
+        // Shift path to pack space and apply roll offset
+        let packPath = localPath.map { ToolpathPoint(x: $0.x + packStartX, a: $0.a + rollOffset) }
+        let firstPt  = packPath[0]
 
-        let packPath = shiftedPath.map { ToolpathPoint(x: $0.x + packStartX, a: $0.a) }
-        let firstPt = packPath[0]
-
-        // 2. Scrap-safe lead-ins
+        // Raw pierce point (before A-axis shift)
+        let rawPierceA: CGFloat
         let pierceX: CGFloat
-        let pierceA: CGFloat
 
         switch feature.type {
         case .startCut:
-            // Piercing from the left (chuck side gap)
-            pierceX = packStartX - settings.leadInDistance
-            pierceA = firstPt.a
+            pierceX    = packStartX - settings.leadInDistance
+            rawPierceA = firstPt.a
         case .endCut:
-            // Piercing from the right (free end gap)
-            pierceX = packEndX + settings.leadInDistance
-            pierceA = firstPt.a
+            pierceX    = packEndX + settings.leadInDistance
+            rawPierceA = firstPt.a
         case .hole, .cutout:
-            // Center of pocket
-            pierceX = feature.xCenter + packStartX
-            pierceA = feature.aCenterDeg + rollOffset
+            // Pierce at centroid — always inside the removed pocket (hull-safe)
+            pierceX    = feature.xCenter + packStartX
+            rawPierceA = feature.aCenterDeg + rollOffset
         case .notch:
-            if feature.xCenter < stock.length / 2.0 {
-                pierceX = packStartX - settings.leadInDistance
-            } else {
-                pierceX = packEndX + settings.leadInDistance
-            }
-            pierceA = firstPt.a
+            pierceX    = feature.xCenter < stock.length / 2 ? packStartX - settings.leadInDistance
+                                                              : packEndX  + settings.leadInDistance
+            rawPierceA = firstPt.a
         }
 
+        // Shift everything by the nearest multiple of 360° to minimise A-axis travel
+        let shift  = round((currentA - rawPierceA) / 360.0) * 360.0
+        let pierceA = rawPierceA + shift
+        let adjPath = packPath.map { ToolpathPoint(x: $0.x, a: $0.a + shift) }
+
+        let packXLabel = String(format: "%.1f", feature.xCenter + packStartX)
+        let aLabel     = String(format: "%.1f", feature.aCenterDeg + rollOffset)
+
         var lines: [String] = [
-            "; --- \(feature.type.rawValue.capitalized)  packX=\(String(format: "%.1f", feature.xCenter + packStartX))mm ---",
+            "; --- \(feature.type.rawValue.capitalized)  packX=\(packXLabel)mm  A=\(aLabel)° ---",
             "G0 Z\(String(format: "%.1f", settings.safeHeight))",
             "G0 X\(String(format: "%.3f", pierceX)) A\(String(format: "%.3f", pierceA))",
             "M3 S1                         ; torch on",
-            "G1 X\(String(format: "%.3f", firstPt.x)) A\(String(format: "%.3f", firstPt.a)) F\(settings.feedRate)",
+            "G1 X\(String(format: "%.3f", adjPath[0].x)) A\(String(format: "%.3f", adjPath[0].a)) F\(settings.feedRate)",
         ]
 
-        // Trace boundary
-        for pt in packPath {
+        for pt in adjPath {
             lines.append("G1 X\(String(format: "%.3f", pt.x)) A\(String(format: "%.3f", pt.a))")
         }
 
-        // 3. Interpolated Overburn tab
-        if isClosed && packPath.count > 2 {
-            lines.append("; Overburn tab (\(settings.overburnDegrees) deg)")
-            var travel: CGFloat = 0
-            
-            for i in 1..<packPath.count {
-                let pt1 = packPath[i-1]
-                let pt2 = packPath[i]
-                let segA = abs(pt2.a - pt1.a)
-                
-                if travel + segA >= settings.overburnDegrees {
-                    // Interpolate the exact cut point
-                    let needed = settings.overburnDegrees - travel
-                    let ratio = needed / segA
-                    let overburnX = pt1.x + (pt2.x - pt1.x) * ratio
-                    let overburnA = pt1.a + (pt2.a - pt1.a) * ratio
-                    
-                    let totalSweep = packPath.last!.a - packPath.first!.a
-                    var finalA = overburnA
-                    if abs(totalSweep) > 350.0 {
-                        finalA += totalSweep > 0 ? 360.0 : -360.0
-                    }
-                    
-                    lines.append("G1 X\(String(format: "%.3f", overburnX)) A\(String(format: "%.3f", finalA))")
-                    break
-                } else {
-                    // Consume the whole segment
-                    let totalSweep = packPath.last!.a - packPath.first!.a
-                    var finalA = pt2.a
-                    if abs(totalSweep) > 350.0 {
-                        finalA += totalSweep > 0 ? 360.0 : -360.0
-                    }
-                    lines.append("G1 X\(String(format: "%.3f", pt2.x)) A\(String(format: "%.3f", finalA))")
-                    travel += segA
-                }
-            }
+        // Overburn: exactly overburnDegrees past the closing point
+        var finalA = adjPath.last!.a
+        if feature.type == .startCut || feature.type == .endCut {
+            let overburnA = finalA + settings.overburnDegrees
+            lines.append("; Overburn \(String(format: "%.0f", settings.overburnDegrees))°")
+            lines.append("G1 X\(String(format: "%.3f", adjPath.last!.x)) A\(String(format: "%.3f", overburnA))")
+            finalA = overburnA
+        } else if (feature.type == .hole || feature.type == .cutout) && adjPath.count > 1 {
+            let dir: CGFloat = (adjPath[1].a - adjPath[0].a) >= 0 ? 1 : -1
+            let overburnA = finalA + dir * settings.overburnDegrees
+            lines.append("; Overburn tab")
+            lines.append("G1 X\(String(format: "%.3f", adjPath.last!.x)) A\(String(format: "%.3f", overburnA))")
+            finalA = overburnA
         }
 
         lines.append("M5                            ; torch off")
-        return lines
+        return (lines, finalA)
     }
 
     // MARK: - Path Optimization Helpers

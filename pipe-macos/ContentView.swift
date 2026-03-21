@@ -213,6 +213,17 @@ enum ViewMode: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+// MARK: - Simulation Segment
+struct SimSegment {
+    let startX: Float   // G-code X at segment start (pack space)
+    let startA: Float   // G-code A (degrees) at segment start
+    let endX: Float     // G-code X at segment end
+    let endA: Float     // G-code A (degrees) at segment end
+    let torchOn: Bool   // whether torch fires during this segment
+    let isCut: Bool     // true = G1 feed, false = G0 rapid
+    let realDuration: Float // real-world seconds for this segment (speed multiplier applied separately)
+}
+
 class AppViewModel: ObservableObject {
     @Published var loadedModel: Model3D?
     @Published var selectedShape: SelectedShape?
@@ -220,6 +231,14 @@ class AppViewModel: ObservableObject {
     @Published var generatedGCode: String?
     @Published var viewMode: ViewMode = .solid
     @Published var packScene: SCNScene?
+    @Published var simRunning = false
+    @Published var simSpeedMultiplier: Float = 10.0  // 1× = real time, 10× = 10 times faster
+    private var simTimer: Timer?
+    private var simTotalLength: Float = 0
+    private var simStockRadius: Float = 30.0
+    private var simSegments: [SimSegment] = []
+    private var simSegmentIdx: Int = 0
+    private var simSegmentElapsed: Float = 0  // seconds into current segment (in real-time units)
 
     var selectedShapeSummary: String? {
         selectedShape?.stockInfo.map { stockSummaryText(for: $0) }
@@ -253,6 +272,7 @@ class AppViewModel: ObservableObject {
               let all = loadedModel?.selectableShapes else {
             matchingShapes = []
             packScene = nil
+            stopSim()
             return
         }
         matchingShapes = all.filter { other in
@@ -307,10 +327,11 @@ class AppViewModel: ObservableObject {
     }
     
     // Update: Generates G-code for the whole pack
-    func generatePackGCode() {
+    func generatePackGCode(triggerSave: Bool = true) {
         guard let selected = selectedShape else { return }
         let allShapes = [selected] + matchingShapes
-        let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) > ($1.stockInfo?.length ?? 0) }
+        // Ascending: same order as buildPackScene — shortest left, longest right (first cut)
+        let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) < ($1.stockInfo?.length ?? 0) }
 
         let gap: CGFloat = 10.0
         var packX: CGFloat = 0
@@ -318,7 +339,7 @@ class AppViewModel: ObservableObject {
         for shape in sorted {
             guard let stock = shape.stockInfo else { continue }
             let len = stock.length
-            
+
             // Calculate the roll offset for each piece in the pack
             let q1 = alignAxisToX(stock.axis)
             var rollDeg: CGFloat = 0
@@ -327,14 +348,19 @@ class AppViewModel: ObservableObject {
                 let rollAngle = atan2(rotatedU.z, rotatedU.y)
                 rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
             }
-            
+
             entries.append(PackEntry(shape: shape, packStartX: packX, rollOffset: rollDeg))
             packX += len + gap
         }
 
         let generator = GCodeGenerator()
         generatedGCode = generator.generatePackGCode(entries: entries)
-        NotificationCenter.default.post(name: .saveGCode, object: nil)
+        // Build simulation segments from the G-code so Start replays the actual toolpath
+        simSegments = buildSimSegments(from: generatedGCode ?? "")
+        resetSim()
+        if triggerSave {
+            NotificationCenter.default.post(name: .saveGCode, object: nil)
+        }
     }
 
     // Update: Generates G-code for a selected shape with roll alignment
@@ -371,13 +397,17 @@ class AppViewModel: ObservableObject {
     }
 
     func buildPackScene() {
+        stopSim()
+        simSegments = []
+        simSegmentIdx = 0
+        simSegmentElapsed = 0
         guard let selected = selectedShape, selected.stockInfo != nil else {
             packScene = nil
             return
         }
         let allShapes = [selected] + matchingShapes
-        // Sort longest first: minimises inter-piece gaps when pieces come from one stock bar
-        let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) > ($1.stockInfo?.length ?? 0) }
+        // Ascending sort: shortest on left, longest on RIGHT (torch side)
+        let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) < ($1.stockInfo?.length ?? 0) }
 
         let scene = SCNScene()
         let gap: Float = 10.0
@@ -392,27 +422,26 @@ class AppViewModel: ObservableObject {
         scene.rootNode.addChildNode(ambientNode)
 
         let dirNode = SCNNode()
-        let dir = SCNLight()
-        dir.type = .directional
-        dirNode.light = dir
+        let dirLight = SCNLight()
+        dirLight.type = .directional
+        dirNode.light = dirLight
         dirNode.eulerAngles = SCNVector3(-Float.pi / 4, Float.pi / 4, 0)
         scene.rootNode.addChildNode(dirNode)
+
+        // All piece geometry goes into stockGroup so it can translate/rotate as one unit
+        let stockGroup = SCNNode()
+        stockGroup.name = "stockGroup"
+        scene.rootNode.addChildNode(stockGroup)
 
         for (idx, shape) in sorted.enumerated() {
             guard let stock = shape.stockInfo,
                   let geometry = shape.node?.geometry else { continue }
 
             let length = Float(stock.length)
-
-            // Step 1: align tube axis to X
             let q1 = alignAxisToX(stock.axis)
-            // Step 2: for HSS, roll around X so uAxis maps to +Y — makes all faces co-planar
-            // across all pieces (critical for later G-code generation).
-            // Round tubes are rotationally symmetric so no roll correction needed.
             let q: simd_quatf
             if stock.profile != .round {
                 let rotatedU = q1.act(normalize(stock.uAxis))
-                // rotatedU is in YZ plane after q1; find angle from +Y and cancel it
                 let rollAngle = atan2(rotatedU.z, rotatedU.y)
                 let q2 = simd_quatf(angle: -rollAngle, axis: SIMD3<Float>(1, 0, 0))
                 q = q2 * q1
@@ -420,8 +449,6 @@ class AppViewModel: ObservableObject {
                 q = q1
             }
 
-            // Transform each vertex: center on tube origin, rotate axis to X, place in row
-            // Piece spans [packX … packX+length] along X — no overlap guaranteed.
             let origVerts = extractVertices(from: geometry)
             var newVerts: [SCNVector3] = []
             for v in origVerts {
@@ -443,7 +470,7 @@ class AppViewModel: ObservableObject {
 
             let node = SCNNode(geometry: packGeometry)
             node.name = "pack_\(idx)"
-            scene.rootNode.addChildNode(node)
+            stockGroup.addChildNode(node)
 
             let cross = max(Float(stock.odX ?? stock.od ?? 0), Float(stock.odY ?? stock.od ?? 0))
             maxCross = max(maxCross, cross)
@@ -451,7 +478,28 @@ class AppViewModel: ObservableObject {
         }
 
         let totalLength = packX > gap ? packX - gap : packX
-        let camDist = max(maxCross * 3.0, totalLength * 0.4)
+        simTotalLength  = totalLength
+        simStockRadius  = maxCross / 2.0
+
+        // Torch: a downward-pointing cone fixed in scene space (not in stockGroup).
+        // Positioned at the RIGHT end of the stock (where cutting starts).
+        let torchHeight: Float = 16.0
+        let torchCone = SCNCone(topRadius: CGFloat(maxCross * 0.08), bottomRadius: 0, height: CGFloat(torchHeight))
+        let torchMat = SCNMaterial()
+        torchMat.diffuse.contents  = NSColor(red: 1.0, green: 0.75, blue: 0.1, alpha: 1.0)
+        torchMat.emission.contents = NSColor(red: 0.4, green: 0.2,  blue: 0.0, alpha: 1.0)
+        torchMat.isDoubleSided = true
+        torchCone.materials = [torchMat]
+        let torchNode = SCNNode(geometry: torchCone)
+        torchNode.name = "torch"
+        // SCNCone with topRadius=fat, bottomRadius=0: tip is at -height/2 in local Y.
+        // We want tip to sit just above stock surface (Y = maxCross/2 + 2).
+        let tipY = maxCross / 2.0 + 2.0
+        torchNode.position = SCNVector3(CGFloat(totalLength), CGFloat(tipY + torchHeight / 2.0), 0)
+        scene.rootNode.addChildNode(torchNode)
+
+        // Camera: look at full initial stock range, torch on the right
+        let camDist = max(maxCross * 3.5, totalLength * 0.5)
         let cameraNode = SCNNode()
         let camera = SCNCamera()
         camera.zFar = 100000.0
@@ -462,6 +510,134 @@ class AppViewModel: ObservableObject {
         scene.rootNode.addChildNode(cameraNode)
 
         packScene = scene
+    }
+
+    // MARK: - Simulation
+
+    func resetSim() {
+        stopSim()
+        simSegmentIdx = 0
+        simSegmentElapsed = 0
+        // Show torch at the free (right) end of stock — where cutting starts
+        applySimState(gcodeX: simTotalLength, gcodeA: 0, torchOn: false)
+    }
+
+    func toggleSim() {
+        if simRunning { stopSim() } else { startSim() }
+    }
+
+    private func startSim() {
+        // Auto-generate G-code (and segments) if not yet done
+        if simSegments.isEmpty { generatePackGCode(triggerSave: false) }
+        guard !simSegments.isEmpty else { return }
+        simRunning = true
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.stepSim()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        simTimer = timer
+    }
+
+    private func stopSim() {
+        simRunning = false
+        simTimer?.invalidate()
+        simTimer = nil
+    }
+
+    private func stepSim() {
+        let dt: Float = 1.0 / 60.0
+        // Advance elapsed time in real-world seconds × speed multiplier
+        simSegmentElapsed += dt * simSpeedMultiplier
+        while simSegmentIdx < simSegments.count {
+            let seg = simSegments[simSegmentIdx]
+            if simSegmentElapsed <= seg.realDuration {
+                let t = simSegmentElapsed / seg.realDuration
+                let x = seg.startX + t * (seg.endX - seg.startX)
+                let a = seg.startA + t * (seg.endA - seg.startA)
+                applySimState(gcodeX: x, gcodeA: a, torchOn: seg.torchOn)
+                return
+            }
+            simSegmentElapsed -= seg.realDuration
+            simSegmentIdx += 1
+        }
+        // All segments done
+        if let last = simSegments.last {
+            applySimState(gcodeX: last.endX, gcodeA: last.endA, torchOn: false)
+        }
+        stopSim()
+    }
+
+    private func applySimState(gcodeX: Float, gcodeA: Float, torchOn: Bool) {
+        guard let scene = packScene,
+              let stockGroup = scene.rootNode.childNode(withName: "stockGroup", recursively: false) else { return }
+        // Torch is fixed at simTotalLength in scene space; stock moves so torch appears at gcodeX
+        stockGroup.position = SCNVector3(simTotalLength - gcodeX, 0, 0)
+        stockGroup.eulerAngles = SCNVector3(gcodeA * Float.pi / 180.0, 0, 0)
+        // Light up torch when cutting
+        if let torchNode = scene.rootNode.childNode(withName: "torch", recursively: false) {
+            torchNode.geometry?.firstMaterial?.emission.contents = torchOn
+                ? NSColor(red: 1.0, green: 0.4, blue: 0.0, alpha: 1.0)
+                : NSColor.black
+        }
+    }
+
+    // MARK: - G-code to Simulation Segments
+
+    private func buildSimSegments(from gcode: String) -> [SimSegment] {
+        let rapidFeed: Float = 3000.0      // mm/min for G0 rapids
+        let effRadius: Float = max(simStockRadius, 20.0)  // for arc-distance timing estimate
+
+        var segments: [SimSegment] = []
+        var curX: Float = 0, curA: Float = 0, curZ: Float = 0
+        var curFeed: Float = 1000
+        var torchOn = false
+
+        for rawLine in gcode.components(separatedBy: "\n") {
+            let commentStripped = rawLine.components(separatedBy: ";")[0]
+            let line = commentStripped.trimmingCharacters(in: .whitespaces).uppercased()
+            guard !line.isEmpty else { continue }
+
+            if line.hasPrefix("M3") { torchOn = true;  continue }
+            if line.hasPrefix("M5") { torchOn = false; continue }
+
+            // G92 resets the tracked coordinates without creating a segment
+            if line.hasPrefix("G92") {
+                for tok in line.components(separatedBy: " ") {
+                    if tok.hasPrefix("X"), let v = Float(tok.dropFirst()) { curX = v }
+                    if tok.hasPrefix("A"), let v = Float(tok.dropFirst()) { curA = v }
+                    if tok.hasPrefix("Z"), let v = Float(tok.dropFirst()) { curZ = v }
+                }
+                continue
+            }
+
+            let isG0 = line.hasPrefix("G0 ") || line.hasPrefix("G00 ")
+            let isG1 = line.hasPrefix("G1 ") || line.hasPrefix("G01 ")
+            guard isG0 || isG1 else { continue }
+
+            var newX = curX, newA = curA, newZ = curZ
+            for tok in line.components(separatedBy: " ") {
+                if tok.hasPrefix("X"), let v = Float(tok.dropFirst()) { newX = v }
+                if tok.hasPrefix("A"), let v = Float(tok.dropFirst()) { newA = v }
+                if tok.hasPrefix("Z"), let v = Float(tok.dropFirst()) { newZ = v }
+                if tok.hasPrefix("F"), let v = Float(tok.dropFirst()) { curFeed = v }
+            }
+
+            let effectiveFeed = isG0 ? rapidFeed : curFeed
+            let dx = newX - curX
+            let da_mm = (newA - curA) * Float.pi / 180.0 * effRadius
+            let dz = newZ - curZ
+            let dist = sqrt(dx * dx + da_mm * da_mm + dz * dz)
+            let realSec = max(dist / max(effectiveFeed / 60.0, 0.001), 0.0001)
+
+            segments.append(SimSegment(
+                startX: curX, startA: curA,
+                endX: newX, endA: newA,
+                torchOn: torchOn, isCut: isG1,
+                realDuration: realSec
+            ))
+            curX = newX; curA = newA; curZ = newZ
+        }
+        return segments
     }
 
     // Helper functions to extract mesh data from SceneKit geometry
@@ -556,7 +732,7 @@ struct PackView: View {
             VStack(spacing: 0) {
                 Divider()
                 HStack(spacing: 0) {
-                    // 3D pack render
+                    // Left: 3D pack render + sim controls
                     VStack(spacing: 0) {
                         HStack {
                             Text("Pack View")
@@ -564,19 +740,49 @@ struct PackView: View {
                                 .foregroundColor(.secondary)
                             Spacer()
                             let n = viewModel.matchingShapes.count + 1
-                            Text("\(n) piece\(n == 1 ? "" : "s") · longest first")
+                            Text("← longest on right (\(n) piece\(n == 1 ? "" : "s"))")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
+
                         PackSceneView(scene: scene)
                             .frame(height: 180)
+
+                        // Simulation controls
+                        HStack(spacing: 8) {
+                            Button("⏮ Reset") {
+                                viewModel.resetSim()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Button(viewModel.simRunning ? "⏹ Stop" : "▶ Start") {
+                                viewModel.toggleSim()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+
+                            Divider().frame(height: 16)
+
+                            Text("Speed: \(Int(viewModel.simSpeedMultiplier))×")
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(width: 70, alignment: .leading)
+
+                            Slider(value: $viewModel.simSpeedMultiplier, in: 1...100, step: 1)
+                                .frame(width: 120)
+                                .controlSize(.small)
+
+                            Spacer()
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
                     }
 
                     Divider()
 
-                    // Stock info panel
+                    // Right: stock info + generate button
                     PackInfoView(viewModel: viewModel)
                         .frame(width: 200)
                 }
@@ -612,7 +818,7 @@ struct PackInfoView: View {
     private var sortedShapes: [SelectedShape] {
         guard let s = viewModel.selectedShape else { return [] }
         return ([s] + viewModel.matchingShapes)
-            .sorted { ($0.stockInfo?.length ?? 0) > ($1.stockInfo?.length ?? 0) }
+            .sorted { ($0.stockInfo?.length ?? 0) < ($1.stockInfo?.length ?? 0) }
     }
 
     private var totalStockLength: CGFloat {
