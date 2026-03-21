@@ -464,17 +464,20 @@ class GCodeGenerator {
             vFinal[i] = min(vFwd[i], vEntryLimit)
         }
 
-        // 5. Convert Safe Surface Speeds to SimCNC G94 4D Spoofed Feedrates
+        // 5. Convert Safe Surface Speeds to feedrates
         for i in 0..<segments.count {
-            // Take the average safe surface speed across this segment
-            var vSafe = (vFinal[i] + vFinal[i+1]) / 2.0
-            if vSafe < 1.0 { vSafe = 1.0 } // Protect against full dead-stops causing div/0
-
-            // Convert to execution time, then back up to SimCNC machine vector feedrate
-            let dt = segments[i].dS / vSafe
-            let fG94 = dt > 1e-6 ? segments[i].dMachine / dt : settings.rapidRate
-
-            segments[i].finalF = min(fG94, settings.rapidRate)
+            if settings.useSimCNC {
+                // SimCNC G94 4D spoofed feedrate: preserves execution time across all axes
+                var vSafe = (vFinal[i] + vFinal[i+1]) / 2.0
+                if vSafe < 1.0 { vSafe = 1.0 }
+                let dt = segments[i].dS / vSafe
+                let fG94 = dt > 1e-6 ? segments[i].dMachine / dt : settings.rapidRate
+                segments[i].finalF = min(fG94, settings.rapidRate)
+            } else {
+                // Standard mode: clamp kinematically profiled surface speed directly to feedRate
+                let vSafe = min((vFinal[i] + vFinal[i+1]) / 2.0, settings.feedRate)
+                segments[i].finalF = max(vSafe, 1.0)
+            }
         }
 
         // --- G-Code Output Generation ---

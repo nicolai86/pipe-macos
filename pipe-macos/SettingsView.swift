@@ -41,6 +41,21 @@ struct SettingsView: View {
             case .presets:  presetsTab
             case .advanced: advancedTab
             }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("OK") {
+                    manager.savePresets()
+                    manager.saveAdvanced()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: [])
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
         .frame(minWidth: 720, minHeight: 480)
     }

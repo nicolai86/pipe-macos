@@ -37,7 +37,15 @@ class CutPresetManager: ObservableObject {
     static let shared = CutPresetManager()
 
     @Published var presets: [CutPreset] = []
-    @Published var activePresetID: UUID? = nil
+    @Published var activePresetID: UUID? = nil {
+        didSet {
+            if let id = activePresetID {
+                UserDefaults.standard.set(id.uuidString, forKey: "activePresetID")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "activePresetID")
+            }
+        }
+    }
     @Published var advancedSettings: AdvancedSettings = AdvancedSettings()
 
     var activePreset: CutPreset? {
@@ -95,7 +103,12 @@ class CutPresetManager: ObservableObject {
             advancedSettings = decoded
         }
 
-        if activePresetID == nil || !presets.contains(where: { $0.id == activePresetID }) {
+        // Restore active preset selection — fall back to first if saved ID is gone
+        if let saved = UserDefaults.standard.string(forKey: "activePresetID"),
+           let uuid = UUID(uuidString: saved),
+           presets.contains(where: { $0.id == uuid }) {
+            activePresetID = uuid
+        } else {
             activePresetID = presets.first?.id
         }
     }
