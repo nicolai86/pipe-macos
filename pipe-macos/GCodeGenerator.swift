@@ -39,7 +39,7 @@ struct GCodeSettings {
     
     // Kerf & Comp
     var kerfWidth: CGFloat = 2.0 // mm
-    var enableKerfComp: Bool = true
+    var enableKerfComp: Bool = true // Now strictly handled offline via math, not controller G41/G42
     
     // Advanced Trajectory Smoothing & Error Compensation
     var enableNonlinearErrorCompensation: Bool = true
@@ -286,6 +286,78 @@ class GCodeGenerator {
         return sqrt(dx*dx + arcLen*arcLen)
     }
 
+    // MARK: - SOTA: Offline 2D Polyline Kerf Offset
+    
+    private func applyOfflineKerfOffset(to path: [ToolpathPoint], radius: CGFloat, isClosed: Bool, k: CGFloat) -> [ToolpathPoint] {
+        guard path.count > 1, radius != 0 else { return path }
+        
+        // Convert A degrees to mm using conversion factor k
+        let pts: [(x: CGFloat, y: CGFloat)] = path.map { ($0.x, $0.a * k) }
+        var offsetPts: [(x: CGFloat, y: CGFloat)] = []
+        
+        for i in 0..<pts.count {
+            let prevIdx = (i == 0) ? (isClosed ? pts.count - 2 : 0) : i - 1
+            let nextIdx = (i == pts.count - 1) ? (isClosed ? 1 : pts.count - 1) : i + 1
+            
+            let pPrev = pts[prevIdx]
+            let pCurr = pts[i]
+            let pNext = pts[nextIdx]
+            
+            // In vector
+            var vInX = pCurr.x - pPrev.x
+            var vInY = pCurr.y - pPrev.y
+            let lenIn = sqrt(vInX*vInX + vInY*vInY)
+            if lenIn > 1e-6 { vInX /= lenIn; vInY /= lenIn }
+            
+            // Out vector
+            var vOutX = pNext.x - pCurr.x
+            var vOutY = pNext.y - pCurr.y
+            let lenOut = sqrt(vOutX*vOutX + vOutY*vOutY)
+            if lenOut > 1e-6 { vOutX /= lenOut; vOutY /= lenOut }
+            
+            // Failsafe for open endpoints to simulate continuity
+            if !isClosed {
+                if i == 0 { vInX = vOutX; vInY = vOutY }
+                else if i == pts.count - 1 { vOutX = vInX; vOutY = vInY }
+            }
+            
+            // 2D Normal Vectors pointing Left of the travel direction
+            let nInX = -vInY, nInY = vInX
+            let nOutX = -vOutY, nOutY = vOutX
+            
+            // Calculate strictly shifted coordinate parallel lines
+            let p1x = pCurr.x + radius * nInX
+            let p1y = pCurr.y + radius * nInY
+            
+            let p2x = pCurr.x + radius * nOutX
+            let p2y = pCurr.y + radius * nOutY
+            
+            // Calculate mathematical intersection of the two shifted vectors
+            let cross = vInX * vOutY - vInY * vOutX
+            
+            if abs(cross) < 1e-6 {
+                // Segments are collinear; safe to drop the vertex straight down
+                offsetPts.append((p1x, p1y))
+            } else {
+                // Standard geometric line intersection bisector
+                let dx = p2x - p1x
+                let dy = p2y - p1y
+                let t = (dx * vOutY - dy * vOutX) / cross
+                let ix = p1x + t * vInX
+                let iy = p1y + t * vInY
+                offsetPts.append((ix, iy))
+            }
+        }
+        
+        // Hard-clamp the closure to prevent micro-gaps
+        if isClosed {
+            offsetPts[offsetPts.count - 1] = offsetPts[0]
+        }
+        
+        // Convert y coordinate back to degrees A
+        return offsetPts.map { ToolpathPoint(x: $0.x, a: $0.y / k) }
+    }
+
     // MARK: - State of the Art Offline TCP Generation
     
     private func generateTCPToolpath(
@@ -395,24 +467,30 @@ class GCodeGenerator {
 
         // --- DYNAMIC SCRAP-SIDE MULTIPLIER ---
         var isScrapLeft = false
-        var compCode = "G42"
 
         if isInternal {
             // Internal cut: Force CW in machine space. Scrap is on the Right.
             if signedArea > 0 { finalPath.reverse() }
             isScrapLeft = false
-            compCode = "G42"
         } else {
             // Sever Cuts: Force CCW in machine space. Scrap is on the Left.
             if feature.type == .startCut {
                 if finalPath.last!.a < finalPath.first!.a { finalPath.reverse() }
                 isScrapLeft = true
-                compCode = "G41"
             } else if feature.type == .endCut {
                 if finalPath.last!.a > finalPath.first!.a { finalPath.reverse() }
                 isScrapLeft = true
-                compCode = "G41"
             }
+        }
+        
+        // ====================================================================
+        // --- OFFLINE KERF COMPENSATION (CONTROLLER G41/G42 REPLACEMENT) ---
+        // ====================================================================
+        if settings.enableKerfComp {
+            // If Scrap is on the Left (Sever), we shift the path entirely to the Right (positive normal).
+            // If Scrap is on the Right (Internal), we shift the path entirely to the Left (negative normal).
+            let kerfRadius = isScrapLeft ? (settings.kerfWidth / 2.0) : -(settings.kerfWidth / 2.0)
+            finalPath = applyOfflineKerfOffset(to: finalPath, radius: kerfRadius, isClosed: isInternal, k: k)
         }
 
         // 3. TANGENTIAL Overburn (Lead-Out Fix)
@@ -445,13 +523,7 @@ class GCodeGenerator {
         let leadR = settings.leadInAngleDistance
         let leadTheta = settings.leadInAngle * .pi / 180.0
         
-        // ====================================================================
-        // --- SOTA: KERF-AWARE LEAD-IN LENGTHENING ---
-        // Controller G41/G42 buffer crashes if lead-in <= tool radius.
-        // We mathematically clamp the linear portion to be strictly > kerfWidth.
-        // ====================================================================
-        let safeLeadL = settings.enableKerfComp ? max(settings.leadInDistance, settings.kerfWidth + 0.1) : settings.leadInDistance
-        let leadL = safeLeadL
+        let leadL = settings.leadInDistance
         
         // Dynamically invert the tangent logic based on true scrap location
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
@@ -733,7 +805,7 @@ class GCodeGenerator {
         let typeStr = feature.type.rawValue.capitalized
         let directionStr = isInternal ? "CW (Physical CCW)" : "CCW (Physical CW)"
         lines.append("; --- \(typeStr)  X=\(fmt(feature.xCenter + packStartX))mm  A=\(fmt(feature.aCenterDeg + rollOffset))° ---")
-        lines.append("; TCP Active | Swirl Comp: \(directionStr) | Tangential OB | Comp: \(compCode)")
+        lines.append("; TCP Active | Swirl Comp: \(directionStr) | Tangential OB | Comp: Offline (\(settings.enableKerfComp ? "Enabled" : "Disabled"))")
         
         let pierceMp = machinePoints[0]
         let dynamicSafeZ = settings.enableDynamicSafeZ ? getDynamicSafeZ(stock: stock) : (pierceMp.Zm + settings.safeHeight)
@@ -755,7 +827,7 @@ class GCodeGenerator {
             }
         }
 
-        // Executing the Profiled Trajectory + Dynamic G41/G42 Injection
+        // Executing the Profiled Trajectory
         for i in 1..<machinePoints.count {
             let curr = machinePoints[i]
             let seg = segments[i-1]
@@ -771,19 +843,11 @@ class GCodeGenerator {
                 }
             }
             
-            var cmdPrefix = "G1 "
-            
-            // Apply Kerf Comp strictly on the first linear interpolated lead-in move
-            if i == 1 && settings.enableKerfComp {
-                cmdPrefix = "G1 \(compCode) "
-            }
-            
-            lines.append("\(cmdPrefix)X\(fmt(curr.Xm)) Y\(fmt(curr.Ym)) Z\(fmt(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmt(seg.finalF))")
+            lines.append("G1 X\(fmt(curr.Xm)) Y\(fmt(curr.Ym)) Z\(fmt(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmt(seg.finalF))")
         }
 
-        // Torch Off and G40 Cancel
-        let g40Cancel = settings.enableKerfComp ? "G40 " : ""
-        lines.append("M5 \(g40Cancel)                         ; torch off & cancel kerf comp")
+        // Torch Off and clean retract
+        lines.append("M5                            ; torch off")
         lines.append("G0 Z\(fmt(dynamicSafeZ))  ; retract to asymmetric safe Z envelope before next move")
         return (lines, machinePoints.last!.Am)
     }
