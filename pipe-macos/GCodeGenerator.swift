@@ -45,6 +45,10 @@ struct GCodeSettings {
     var enableNonlinearErrorCompensation: Bool = true
     var nonlinearErrorTolerance: CGFloat = 0.05 // mm (Max allowable chord deviation from true surface curve)
     
+    // Singularity Avoidance (Damped Jacobian)
+    var enableSingularityDamping: Bool = true
+    var singularityDampingFactor: CGFloat = 2.0 // λ (lambda) parameter. Higher = smoother A-axis but more torch tilt lag.
+    
     // Advanced Geometric Lead-in
     var leadInDistance: CGFloat = 5.0
     var leadInAngle: CGFloat = 90.0 // Degrees of the sweep arc
@@ -482,14 +486,10 @@ class GCodeGenerator {
 
 
         // ====================================================================
-        // --- SOTA: DUAL-CHORD NONLINEAR ERROR COMPENSATION & TCP MAPPING ---
+        // --- MACHINE POINT HELPER ---
         // ====================================================================
-        var machinePoints: [MachinePoint] = []
-        var prevAm: CGFloat? = nil
-
         func getWrappedMachinePoint(pt: ToolpathPoint, refAm: CGFloat?) -> MachinePoint {
             var mp = convertToMachine(pt: pt, stock: stock)
-            
             if let prev = refAm {
                 while mp.Am - prev > 180.0 { mp.Am -= 360.0 }
                 while mp.Am - prev < -180.0 { mp.Am += 360.0 }
@@ -500,50 +500,126 @@ class GCodeGenerator {
             return mp
         }
 
-        if !finalPath.isEmpty {
-            let firstPt = finalPath[0]
-            let firstMp = getWrappedMachinePoint(pt: firstPt, refAm: prevAm)
-            prevAm = firstMp.Am
-            machinePoints.append(firstMp)
+        // ====================================================================
+        // --- 1. SOTA: RAW MACHINE PATH GENERATION ---
+        // ====================================================================
+        var rawMachinePoints: [MachinePoint] = []
+        var prevAmRaw: CGFloat? = nil
+
+        for pt in finalPath {
+            let mp = getWrappedMachinePoint(pt: pt, refAm: prevAmRaw)
+            prevAmRaw = mp.Am
+            rawMachinePoints.append(mp)
+        }
+
+        // ====================================================================
+        // --- 2. SOTA: DAMPED JACOBIAN PSEUDOINVERSE (SINGULARITY AVOIDANCE) ---
+        // ====================================================================
+        var dampedMachinePoints: [MachinePoint] = []
+        if !rawMachinePoints.isEmpty {
+            dampedMachinePoints.append(rawMachinePoints[0])
             
-            for i in 1..<finalPath.count {
-                let startPt = finalPath[i-1]
-                let endPt = finalPath[i]
+            for i in 1..<rawMachinePoints.count {
+                let prevDamped = dampedMachinePoints.last!
+                let currRaw = rawMachinePoints[i]
                 
-                func appendWithCompensation(sPt: ToolpathPoint, ePt: ToolpathPoint, sMp: MachinePoint, depth: Int = 0) {
-                    let eMp = getWrappedMachinePoint(pt: ePt, refAm: sMp.Am)
+                if settings.enableSingularityDamping {
+                    // 1. Calculate Cartesian surface displacement (independent of rotation)
+                    let dx = currRaw.matX - prevDamped.matX
+                    let du = currRaw.matU - prevDamped.matU
+                    let dv = currRaw.matV - prevDamped.matV
+                    let ds_cartesian = sqrt(dx*dx + du*du + dv*dv)
                     
-                    if settings.enableNonlinearErrorCompensation && depth < 10 {
-                        // 1. True kinematic midpoint (parametric material space mapped to machine space)
-                        let midPt = ToolpathPoint(x: (sPt.x + ePt.x) / 2.0, a: (sPt.a + ePt.a) / 2.0)
-                        let trueMidMp = getWrappedMachinePoint(pt: midPt, refAm: sMp.Am)
-                        
-                        // 2. Linear interpolation midpoint (how the controller will physically move)
-                        let linMidY = (sMp.Ym + eMp.Ym) / 2.0
-                        let linMidZ = (sMp.Zm + eMp.Zm) / 2.0
-                        
-                        // 3. Calculate deviation strictly in the non-linear axes (Y and Z)
-                        let dy = trueMidMp.Ym - linMidY
-                        let dz = trueMidMp.Zm - linMidZ
-                        let deviation = sqrt(dy*dy + dz*dz)
-                        
-                        // 4. Bisect if physical chord error exceeds tolerance
-                        if deviation > settings.nonlinearErrorTolerance {
-                            appendWithCompensation(sPt: sPt, ePt: midPt, sMp: sMp, depth: depth + 1)
-                            appendWithCompensation(sPt: midPt, ePt: ePt, sMp: machinePoints.last!, depth: depth + 1)
-                            return
-                        }
-                    }
+                    // 2. Calculate the difference between the target normal and our current physical angle
+                    let target_dA = currRaw.Am - prevDamped.Am
                     
-                    machinePoints.append(eMp)
+                    // 3. Apply the Damped Least Squares ratio
+                    let lambdaSq = settings.singularityDampingFactor * settings.singularityDampingFactor
+                    let dampingRatio = (ds_cartesian * ds_cartesian) / ((ds_cartesian * ds_cartesian) + lambdaSq)
+                    
+                    let damped_dA = target_dA * dampingRatio
+                    let newAm = prevDamped.Am + damped_dA
+                    
+                    // 4. Recalculate Ym and Zm to ensure the physical torch tip stays perfectly on the cut line
+                    let thetaRad = newAm * .pi / 180.0
+                    let newYm = currRaw.matU * cos(thetaRad) - currRaw.matV * sin(thetaRad)
+                    let newZm = currRaw.matU * sin(thetaRad) + currRaw.matV * cos(thetaRad)
+                    
+                    let baselineZ: CGFloat = (stock.profile == .round) ? (stock.od ?? 50.0)/2.0 : (stock.odY ?? stock.od ?? 50.0)/2.0
+                    let relativeZm = newZm - baselineZ
+                    
+                    var dampedPt = currRaw
+                    dampedPt.Am = newAm
+                    dampedPt.Ym = newYm
+                    dampedPt.Zm = relativeZm
+                    
+                    dampedMachinePoints.append(dampedPt)
+                } else {
+                    dampedMachinePoints.append(currRaw)
                 }
-                
-                appendWithCompensation(sPt: startPt, ePt: endPt, sMp: machinePoints.last!)
             }
         }
 
         // ====================================================================
-        // --- SOTA: NON-LINEAR KINEMATIC JACOBIAN VELOCITY PROFILING ---
+        // --- 3. SOTA: DUAL-CHORD NONLINEAR ERROR COMPENSATION ---
+        // ====================================================================
+        var machinePoints: [MachinePoint] = []
+        
+        if !dampedMachinePoints.isEmpty {
+            machinePoints.append(dampedMachinePoints[0])
+            
+            for i in 1..<dampedMachinePoints.count {
+                let startMp = machinePoints.last!
+                let endMp = dampedMachinePoints[i]
+                
+                func appendWithCompensation(sMp: MachinePoint, eMp: MachinePoint, depth: Int = 0) {
+                    if settings.enableNonlinearErrorCompensation && depth < 10 {
+                        // 1. True kinematic midpoint on the DAMPED path
+                        let midU = (sMp.matU + eMp.matU) / 2.0
+                        let midV = (sMp.matV + eMp.matV) / 2.0
+                        let midAm = (sMp.Am + eMp.Am) / 2.0
+                        
+                        let thetaRad = midAm * .pi / 180.0
+                        let trueMidYm = midU * cos(thetaRad) - midV * sin(thetaRad)
+                        
+                        let baselineZ: CGFloat = (stock.profile == .round) ? (stock.od ?? 50.0)/2.0 : (stock.odY ?? stock.od ?? 50.0)/2.0
+                        let trueMidZm = (midU * sin(thetaRad) + midV * cos(thetaRad)) - baselineZ
+                        
+                        // 2. Linear interpolation midpoint (how the controller moves physically)
+                        let linMidY = (sMp.Ym + eMp.Ym) / 2.0
+                        let linMidZ = (sMp.Zm + eMp.Zm) / 2.0
+                        
+                        // 3. Calculate deviation strictly in the non-linear axes
+                        let dy = trueMidYm - linMidY
+                        let dz = trueMidZm - linMidZ
+                        let deviation = sqrt(dy*dy + dz*dz)
+                        
+                        // 4. Bisect if physical chord error exceeds tolerance
+                        if deviation > settings.nonlinearErrorTolerance {
+                            var midPt = eMp
+                            midPt.matX = (sMp.matX + eMp.matX) / 2.0
+                            midPt.matU = midU
+                            midPt.matV = midV
+                            midPt.Am = midAm
+                            midPt.Ym = trueMidYm
+                            midPt.Zm = trueMidZm
+                            midPt.Xm = (sMp.Xm + eMp.Xm) / 2.0
+                            
+                            appendWithCompensation(sMp: sMp, eMp: midPt, depth: depth + 1)
+                            appendWithCompensation(sMp: midPt, eMp: eMp, depth: depth + 1)
+                            return
+                        }
+                    }
+                    machinePoints.append(eMp)
+                }
+                
+                appendWithCompensation(sMp: startMp, eMp: endMp)
+            }
+        }
+
+
+        // ====================================================================
+        // --- 4. SOTA: NON-LINEAR KINEMATIC JACOBIAN VELOCITY PROFILING ---
         // ====================================================================
         
         var segments: [TrajectorySegment] = []
