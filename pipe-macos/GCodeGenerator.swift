@@ -309,7 +309,14 @@ class GCodeGenerator {
         
         let leadR = settings.leadInAngleDistance
         let leadTheta = settings.leadInAngle * .pi / 180.0
-        let leadL = settings.leadInDistance
+        
+        // ====================================================================
+        // --- SOTA: KERF-AWARE LEAD-IN LENGTHENING ---
+        // Controller G41/G42 buffer crashes if lead-in <= tool radius.
+        // We mathematically clamp the linear portion to be strictly > kerfWidth.
+        // ====================================================================
+        let safeLeadL = settings.enableKerfComp ? max(settings.leadInDistance, settings.kerfWidth + 0.1) : settings.leadInDistance
+        let leadL = safeLeadL
         
         // Dynamically invert the tangent logic based on true scrap location
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0

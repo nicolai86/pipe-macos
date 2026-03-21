@@ -208,7 +208,6 @@ class ModelLoader {
         var tubeAxis = pcaAxis
 
         // --- Step 2: Cluster exact OCCT plane normals (rotation-invariant, no winding dependency) ---
-        // Each cluster entry stores the direction of the first face assigned to it plus total vertex weight.
         var normalClusters: [(dir: SIMD3<Float>, weight: Int)] = []
         for f in facesData {
             guard let type = f["surface_type"] as? String, type == "PLANE",
@@ -219,7 +218,6 @@ class ModelLoader {
             let w = (f["vertices"] as? [[String: Any]])?.count ?? 1
             var found = false
             for i in 0..<normalClusters.count {
-                // abs() groups anti-parallel normals (opposite faces) into the same cluster
                 if abs(dot(normalClusters[i].dir, n)) > 0.95 { normalClusters[i].weight += w; found = true; break }
             }
             if !found { normalClusters.append((dir: n, weight: w)) }
@@ -227,14 +225,6 @@ class ModelLoader {
         normalClusters.sort { $0.weight > $1.weight }
 
         // --- Step 3: Derive tube axis from perpendicular normal pairs ---
-        // For a square/rect tube cross(sideWall1, sideWall2) == tubeAxis.
-        // Score each candidate pair by (combined vertex weight) × (alignment with PCA).
-        // Weight ensures large outer-wall pairs beat small cut-face pairs.
-        // PCA alignment resolves the ± sign ambiguity and ranks quality.
-        // Hard gate of 0.95 (≈ 18°): cope/miter cut faces introduce ±X and ±Z plane normals
-        // whose cross-product gives a global axis (X or Z) with alignment ~0.42–0.91 against PCA.
-        // Requiring > 0.95 lets only true side-wall pairs (alignment ≈ 1.0) override PCA;
-        // everything else leaves tubeAxis = pcaAxis, which is more reliable for these cases.
         var bestScore: Float = 0.0
         for i in 0..<normalClusters.count {
             for j in (i + 1)..<normalClusters.count {
@@ -246,16 +236,12 @@ class ModelLoader {
                 let score = Float(normalClusters[i].weight + normalClusters[j].weight) * alignment
                 if score > bestScore {
                     bestScore = score
-                    // Resolve sign: make candidate point in same hemisphere as PCA
                     tubeAxis = dot(candidate, pcaAxis) >= 0 ? candidate : -candidate
                 }
             }
         }
 
         // --- Step 4: Refine with cylinder axis for round tubes ---
-        // The main outer cylindrical surface's axis IS the tube axis — more precise than PCA.
-        // Also track the largest cylinder radius: round tubes have a large outer cylinder
-        // (r > 5 mm); rectangular tubes only have small corner-radius cylinders (r ≈ 2–4 mm).
         var maxCylVertices = 0
         var maxCylRadius: Float = 0
         for f in facesData {
@@ -264,7 +250,6 @@ class ModelLoader {
             let axis = normalize(SIMD3<Float>(getFloat(cd, "axisX"), getFloat(cd, "axisY"), getFloat(cd, "axisZ")))
             let vCount = (f["vertices"] as? [[String: Any]])?.count ?? 0
             let r = getFloat(cd, "radius")
-            // Only accept if aligned with current tubeAxis (avoids picking axis of a drilled hole)
             if abs(dot(axis, tubeAxis)) > 0.9 && vCount > maxCylVertices {
                 maxCylVertices = vCount
                 maxCylRadius = r
@@ -274,9 +259,6 @@ class ModelLoader {
         tubeAxis = normalize(tubeAxis)
 
         // --- Step 5: Determine cross-section axes (uAxis / vAxis) ---
-        // Side walls: planar faces whose normal is perpendicular to tubeAxis AND has a perpendicular partner.
-        // The "perpendicular partner" test rejects end caps (whose normal IS tubeAxis) and cut faces
-        // (miter / cope faces that typically lack a partner at 90°).
         let sideWallCandidates = normalClusters.filter { abs(dot($0.dir, tubeAxis)) < 0.2 }
         let sideWallsWithPartners = sideWallCandidates.filter { c in
             sideWallCandidates.contains { other in abs(dot(c.dir, other.dir)) < 0.15 }
@@ -286,11 +268,8 @@ class ModelLoader {
         if let dominant = sideWallsWithPartners.first {
             uAxis = dominant.dir
         } else if let sideWall = sideWallCandidates.first {
-            // One pair of side walls (e.g. ±XZ) removed by cope/miter cuts; use the remaining
-            // wall normal directly — cross(tubeAxis, …) gives the complementary axis.
             uAxis = sideWall.dir
         } else {
-            // Fallback for round tubes or unknown profiles
             let arb: SIMD3<Float> = abs(tubeAxis.x) > 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(1, 0, 0)
             uAxis = normalize(cross(tubeAxis, arb))
         }
@@ -319,10 +298,6 @@ class ModelLoader {
         let trueCrossMax = max(trueWidth, trueHeight)
         let trueCrossMin = min(trueWidth, trueHeight)
 
-        // Round tubes have a large outer cylinder (r > 5 mm); rectangular HSS has only small
-        // corner-radius cylinders (r ≈ 2–4 mm).  Using the cylinder radius is more reliable
-        // than counting perpendicular side-wall pairs, which can be zero when cope cuts remove
-        // one pair of side walls entirely.
         let isRound = maxCylRadius > 5.0
         let isRectangular = !isRound && !sideWallCandidates.isEmpty
         let profile: StockProfile = isRectangular
@@ -359,10 +334,6 @@ class ModelLoader {
         var outerWallFaceIDs = Set<Int>()
 
         // Identify outer hull faces using each face's OWN normal direction as reference.
-        // For a flat face, every vertex projects identically onto the face normal, so
-        // dot(any_vertex, n) == the plane's signed distance from the origin.  We compare
-        // this against the global maximum of dot(render_vertex, n) over ALL vertices.
-        // This is fully rotation-invariant and requires no alignment with uAxis/vAxis.
         for face in facesData {
             let faceID = getInt(face, "faceID")
             guard let vArr = face["vertices"] as? [[String: Any]], !vArr.isEmpty else { continue }
@@ -372,11 +343,9 @@ class ModelLoader {
                     let n = normalize(SIMD3<Float>(getFloat(pd, "normalX"), getFloat(pd, "normalY"), getFloat(pd, "normalZ")))
                     guard length(n) > 0.5, abs(dot(n, tubeAxis)) < 0.15 else { continue }
 
-                    // Any vertex on this planar face gives the exact plane distance along n.
                     let fv = vArr[0]
                     let d = dot(SIMD3<Float>(getFloat(fv, "x"), getFloat(fv, "y"), getFloat(fv, "z")), n)
 
-                    // Global maximum extent along n over all mesh vertices.
                     var maxD: Float = -.greatestFiniteMagnitude
                     for rv in renderVerts {
                         maxD = max(maxD, dot(SIMD3<Float>(Float(rv.x), Float(rv.y), Float(rv.z)), n))
@@ -393,13 +362,11 @@ class ModelLoader {
                     let radius = getFloat(cyl, "radius")
                     let u  = abs(dot(cLoc - center, uAxis))
                     let vv = abs(dot(cLoc - center, vAxis))
-                    // Use true cross-section half-widths (rotation-invariant).
+                    
                     let halfU = (maxPosU - minNegU) / 2.0
                     let halfV = (maxPosV - minNegV) / 2.0
-                    // Tight cylinder tolerance: outer corner cylinders touch the outer wall exactly
-                    // (vv+r == halfV by geometry), while inner corners are wall-thickness away.
-                    // 0.5mm covers mesh/float errors but stays below minimum real wall (~1mm).
                     let cylTol: Float = 0.5
+                    
                     if u + radius >= halfU - cylTol || vv + radius >= halfV - cylTol {
                         outerWallFaceIDs.insert(faceID)
                     }
@@ -407,14 +374,13 @@ class ModelLoader {
             }
         }
 
-
-
-        // AAG edge traversal: collect feature boundary edges from outer hull faces.
-        // A feature boundary edge connects an outer hull face to a non-outer-hull face.
-        // Seam/boundary edges (adjFaces.count < 2) are excluded — they are internal cylinder
-        // seams or degenerate edges, not feature boundaries.
-        struct CutEdge { var points: [SIMD3<Float>] }
-        var rawCutEdges: [CutEdge] = []
+        // =================================================================================
+        // SOTA: HIERARCHICAL WIRE EXTRACTION
+        // We now extract and maintain the exact OpenCASCADE wire topology.
+        // BRepTools_WireExplorer guarantees edges are sequential. We append them safely
+        // without distance-guessing, which prevents jumping kerf gaps.
+        // =================================================================================
+        var partialLoops: [[SIMD3<Float>]] = []
 
         for face in facesData {
             let faceID = getInt(face, "faceID")
@@ -423,62 +389,87 @@ class ModelLoader {
 
             for wire in wires {
                 guard let edges = wire["edges"] as? [[String: Any]] else { continue }
+                
+                var currentWireLoop: [SIMD3<Float>] = []
+                
+                // Iterate through the edges sequentially as provided by BRepTools_WireExplorer
                 for edge in edges {
                     let adjFaces = getIntArray(edge["adjacentFaceIDs"])
                     guard let pointsData = edge["points"] as? [[String: Any]], !pointsData.isEmpty else { continue }
-                    // Require at least 2 adjacent faces (manifold edge) and at least one non-outer-wall neighbor
+                    
+                    // Manifold feature boundary edge check
                     let touchesInnerFace = adjFaces.count >= 2 &&
                         adjFaces.contains { !outerWallFaceIDs.contains($0) }
-                    guard touchesInnerFace else { continue }
-                    var pts: [SIMD3<Float>] = []
-                    for p in pointsData { pts.append(SIMD3<Float>(getFloat(p, "x"), getFloat(p, "y"), getFloat(p, "z"))) }
-                    rawCutEdges.append(CutEdge(points: pts))
+                    
+                    if touchesInnerFace {
+                        var pts: [SIMD3<Float>] = []
+                        for p in pointsData { pts.append(SIMD3<Float>(getFloat(p, "x"), getFloat(p, "y"), getFloat(p, "z"))) }
+                        
+                        if currentWireLoop.isEmpty {
+                            currentWireLoop.append(contentsOf: pts)
+                        } else {
+                            let lastPt = currentWireLoop.last!
+                            let firstPt = pts.first!
+                            let endPt = pts.last!
+                            
+                            // 1e-3 tolerance for exact topological connection within the same B-Rep wire
+                            if distance(lastPt, firstPt) < 1e-3 {
+                                currentWireLoop.append(contentsOf: pts.dropFirst())
+                            } else if distance(lastPt, endPt) < 1e-3 {
+                                currentWireLoop.append(contentsOf: pts.reversed().dropFirst())
+                            } else {
+                                // Gap in the feature boundary (e.g., skipped a non-boundary edge)
+                                partialLoops.append(currentWireLoop)
+                                currentWireLoop = pts
+                            }
+                        }
+                    }
+                }
+                if !currentWireLoop.isEmpty {
+                    partialLoops.append(currentWireLoop)
                 }
             }
         }
 
-        // Chain edges into closed/open loops.
-        // Tolerance is relative to tube length to handle models at different scales.
+        // =================================================================================
+        // SOTA: MACROSCOPIC FACE STITCHING
+        // We only stitch the massive, pre-assembled wire segments across face boundaries.
+        // =================================================================================
         let tubeLength = Float(stockInfo.length)
         let stitchTolerance: Float = max(1.5, tubeLength * 0.01)
 
         var loops: [[SIMD3<Float>]] = []
-        var unvisited = rawCutEdges
+        var unvisited = partialLoops
 
         while !unvisited.isEmpty {
-            var currentLoop = unvisited.removeFirst().points
+            var currentLoop = unvisited.removeFirst()
             var added = true
             while added {
                 added = false
-                for (i, edge) in unvisited.enumerated() {
+                for (i, pLoop) in unvisited.enumerated() {
                     let loopStart = currentLoop.first!, loopEnd = currentLoop.last!
-                    let edgeStart = edge.points.first!, edgeEnd = edge.points.last!
+                    let edgeStart = pLoop.first!, edgeEnd = pLoop.last!
+                    
                     if distance(loopEnd, edgeStart) < stitchTolerance {
-                        currentLoop.append(contentsOf: edge.points.dropFirst())
+                        currentLoop.append(contentsOf: pLoop.dropFirst())
                         unvisited.remove(at: i); added = true; break
                     } else if distance(loopEnd, edgeEnd) < stitchTolerance {
-                        currentLoop.append(contentsOf: edge.points.reversed().dropFirst())
+                        currentLoop.append(contentsOf: pLoop.reversed().dropFirst())
                         unvisited.remove(at: i); added = true; break
                     } else if distance(loopStart, edgeEnd) < stitchTolerance {
-                        currentLoop.insert(contentsOf: edge.points.dropLast(), at: 0)
+                        currentLoop.insert(contentsOf: pLoop.dropLast(), at: 0)
                         unvisited.remove(at: i); added = true; break
                     } else if distance(loopStart, edgeStart) < stitchTolerance {
-                        currentLoop.insert(contentsOf: edge.points.reversed().dropLast(), at: 0)
+                        currentLoop.insert(contentsOf: pLoop.reversed().dropLast(), at: 0)
                         unvisited.remove(at: i); added = true; break
                     }
                 }
             }
-            // Accept only geometrically closed loops: end must return to start within the
-            // same stitching tolerance used to join edges. This is scale- and sampling-invariant —
-            // it works regardless of how many sample points OCCT places on each edge.
-            if distance(currentLoop.first!, currentLoop.last!) < stitchTolerance {
-                loops.append(currentLoop)
-            }
+            loops.append(currentLoop)
         }
 
         // Map 3D loops to 2D (axial position, angular position) and classify as features.
         var featureId = 1
-        // Thresholds relative to tube length; absolute minimum of 3mm for short tubes.
         let axisTol = max(3.0, tubeLength * 0.015)
 
         for loop3D in loops {
