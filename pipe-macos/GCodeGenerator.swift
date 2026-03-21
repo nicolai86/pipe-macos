@@ -30,8 +30,11 @@ class GCodeGenerator {
     func generateGCode(for stock: StockInfo, rollOffset: CGFloat = 0.0) -> String {
         var gcode: [String] = []
         gcode.append(contentsOf: generateHeader(stock: stock))
-        gcode.append(contentsOf: generateStartupSequence())
         
+        // Pass the total length to the startup sequence so it sets G92 correctly
+        gcode.append(contentsOf: generateStartupSequence(totalLength: stock.length))
+        
+        // Features are sorted Right-to-Left (Outermost to Chuck)
         let sortedFeatures = sortFeatures(stock.features)
         for feature in sortedFeatures {
             gcode.append(contentsOf: generateFeatureToolpath(
@@ -66,8 +69,10 @@ class GCodeGenerator {
             ""
         ]
         
-        lines.append(contentsOf: generateStartupSequence(packMode: true, count: entries.count))
+        // Pass the total pack length to the startup sequence
+        lines.append(contentsOf: generateStartupSequence(totalLength: totalLength, packMode: true, count: entries.count))
 
+        // Process pieces Right-to-Left (highest X first)
         let ordered = entries.sorted { $0.packStartX > $1.packStartX }
         for (pieceIdx, entry) in ordered.enumerated() {
             guard let stock = entry.shape.stockInfo else { continue }
@@ -79,6 +84,7 @@ class GCodeGenerator {
                     + "\(stock.features.count) feature\(stock.features.count == 1 ? "" : "s") ──",
             ]
 
+            // Within each piece, process features Right-to-Left
             let sortedFeatures = sortFeatures(stock.features)
             for feature in sortedFeatures {
                 lines += generateFeatureToolpath(
@@ -121,14 +127,17 @@ class GCodeGenerator {
 
         switch feature.type {
         case .startCut:
+            // Piercing from the left (chuck side gap)
             pierceX = packStartX - settings.leadInDistance
             pierceA = firstPt.a
         case .endCut:
+            // Piercing from the right (free end gap)
             pierceX = packEndX + settings.leadInDistance
             pierceA = firstPt.a
         case .hole, .cutout:
+            // Center of pocket
             pierceX = feature.xCenter + packStartX
-            pierceA = feature.aCenterDeg + rollOffset // Center of pocket
+            pierceA = feature.aCenterDeg + rollOffset
         case .notch:
             if feature.xCenter < stock.length / 2.0 {
                 pierceX = packStartX - settings.leadInDistance
@@ -151,7 +160,7 @@ class GCodeGenerator {
             lines.append("G1 X\(String(format: "%.3f", pt.x)) A\(String(format: "%.3f", pt.a))")
         }
 
-        // 3. Interpolated Overburn tab (Fixes the massive A-axis jump)
+        // 3. Interpolated Overburn tab
         if isClosed && packPath.count > 2 {
             lines.append("; Overburn tab (\(settings.overburnDegrees) deg)")
             var travel: CGFloat = 0
@@ -195,7 +204,6 @@ class GCodeGenerator {
 
     // MARK: - Path Optimization Helpers
 
-    /// Re-orders a closed path so it begins cutting at the point closest to the specified Target angle (e.g. A=0 / Top Dead Center)
     private func optimizePathStart(path: [ToolpathPoint], targetA: CGFloat) -> [ToolpathPoint] {
         guard path.count > 1 else { return path }
         
@@ -242,7 +250,6 @@ class GCodeGenerator {
         return unwrapped
     }
     
-    /// Unwraps an open path so it stays as close to the target angle as possible
     private func unwrapPathNear(path: [ToolpathPoint], targetA: CGFloat) -> [ToolpathPoint] {
         guard path.count > 0 else { return path }
         var unwrapped: [ToolpathPoint] = []
@@ -266,21 +273,23 @@ class GCodeGenerator {
         return unwrapped
     }
 
-    // MARK: - Sorting & Boilerplate
+    // MARK: - Feature Sorting (Right-to-Left / Outside-In)
     private func sortFeatures(_ features: [SurfaceFeature]) -> [SurfaceFeature] {
         return features.sorted { a, b in
             func priority(_ t: SurfaceFeatureType) -> Int {
                 switch t {
-                case .startCut: return 0
-                case .hole, .cutout, .notch: return 1
-                case .endCut: return 2
+                case .endCut: return 0                // 1. Far end (trimming / squaring)
+                case .hole, .cutout, .notch: return 1 // 2. Middle features
+                case .startCut: return 2              // 3. Near end (severing from chuck)
                 }
             }
             let pA = priority(a.type), pB = priority(b.type)
-            return pA != pB ? pA < pB : a.xCenter < b.xCenter
+            // If priorities match, sort descending by X (highest X to lowest X)
+            return pA != pB ? pA < pB : a.xCenter > b.xCenter
         }
     }
 
+    // MARK: - Boilerplate
     private func generateHeader(stock: StockInfo) -> [String] {
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy, HH:mm"
@@ -302,13 +311,14 @@ class GCodeGenerator {
         return header
     }
 
-    private func generateStartupSequence(packMode: Bool = false, count: Int = 1) -> [String] {
+    // NEW: Accepts totalLength to set the right-most zero point
+    private func generateStartupSequence(totalLength: CGFloat, packMode: Bool = false, count: Int = 1) -> [String] {
         return [
             "G21             ; metric mode",
             "G90             ; absolute positioning",
             "G40             ; cancel cutter comp",
             "G49             ; cancel tool length offset",
-            "G92 X0 Y0 Z0 A0 ; set current position as origin",
+            "G92 X\(String(format: "%.3f", totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
             "",
             "G0 Z\(String(format: "%.1f", settings.safeHeight))     ; move to safe height",
             "M5              ; torch off (ensure)",
