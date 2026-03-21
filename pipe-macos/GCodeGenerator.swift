@@ -2,6 +2,8 @@ import Foundation
 import SceneKit
 
 // MARK: - Pack Entry
+
+/// One piece within a multi-part pack layout.
 struct PackEntry {
     let shape: SelectedShape
     /// X coordinate of the piece's low-X end in pack space (mm).
@@ -13,84 +15,408 @@ struct PackEntry {
 }
 
 // MARK: - Global Feature (Thermal Hedging)
+
+/// A surface feature resolved into pack (global) coordinates, used by the thermal-hedging sequencer.
 struct GlobalFeature {
     let feature: SurfaceFeature
     let stock: StockInfo
+    /// X offset of the owning piece's low-X end in pack space (mm).
     let packStartX: CGFloat
+    /// X offset of the owning piece's high-X end in pack space (mm).
     let packEndX: CGFloat
+    /// A-axis roll offset applied to the owning piece (degrees).
     let rollOffset: CGFloat
+    /// Zero-based index of the owning piece within the pack.
     let pieceIndex: Int
-    
+
+    /// Feature center X in pack (global) coordinates (mm).
     var globalX: CGFloat { packStartX + feature.xCenter }
+    /// Feature center A in pack (global) coordinates (degrees).
     var globalA: CGFloat { feature.aCenterDeg + rollOffset }
 }
 
 // MARK: - GCode Generation Settings
+
+/// All tunable parameters for G-code post-processing.
+///
+/// Default values target a mid-range rotary plasma setup (Hypertherm Powermax 65/85,
+/// NEMA 23 stepper-driven chuck, ~1.5m max tube length).  Adjust per machine and
+/// consumable chart before cutting.
 struct GCodeSettings {
-    var feedRate: CGFloat = 1000.0 // mm/min
-    var rapidRate: CGFloat = 3000.0 // mm/min
-    var safeHeight: CGFloat = 25.0 // mm
-    
-    // NEW: Asymmetric Z-Clearance Envelope
+
+    // -------------------------------------------------------------------------
+    // MARK: Feed Rates
+    // -------------------------------------------------------------------------
+
+    /// Plasma cutting feed rate (mm/min).
+    ///
+    /// Set from the Hypertherm cut chart for your amperage, gas type, and material
+    /// thickness.  Too fast → incomplete cut / dross on underside.  Too slow →
+    /// excessive heat, warping, and top-side dross.
+    ///
+    /// Typical range: 500–5000 mm/min.
+    /// - 6mm mild steel / 65 A: ~2500 mm/min
+    /// - 6mm mild steel / 45 A: ~1500 mm/min
+    /// - 3mm mild steel / 45 A: ~4000 mm/min
+    var feedRate: CGFloat = 1000.0
+
+    /// Rapid-traverse (non-cutting) feed rate (mm/min).
+    ///
+    /// Caps all G0 / repositioning moves.  Should be set to the machine's maximum
+    /// safe traverse speed; going higher risks missed steps on stepper-driven axes.
+    ///
+    /// Typical range: 2000–10 000 mm/min.
+    var rapidRate: CGFloat = 3000.0
+
+    // -------------------------------------------------------------------------
+    // MARK: Z-Axis Clearance
+    // -------------------------------------------------------------------------
+
+    /// Baseline safe Z height above the tube surface used for rapid repositioning (mm).
+    ///
+    /// The torch retracts to this height before every inter-feature rapid move.
+    /// `enableDynamicSafeZ` augments this value for rectangular stock where the
+    /// circumscribed radius exceeds the flat-face half-height.
+    ///
+    /// Typical range: 15–50 mm.  Values below 10 mm risk collision on A-axis
+    /// rotation rapids between features.
+    var safeHeight: CGFloat = 25.0
+
+    /// When `true`, dynamically increases safe Z for rectangular HSS to clear the
+    /// tube's corner radius during A-axis repositioning rapids.
+    ///
+    /// Disable only if your CAM workflow guarantees the A axis never rotates during
+    /// a rapid with the torch lowered, or for round stock where it has no effect.
     var enableDynamicSafeZ: Bool = true
-    
-    var pierceHeight: CGFloat = 3.8 // mm — standoff during pierce, from Hypertherm cut charts
-    var cutHeight: CGFloat = 3.2 // mm
-    
-    // Kerf & Comp
-    var kerfWidth: CGFloat = 2.0 // mm
-    var enableKerfComp: Bool = true // Now strictly handled offline via math, not controller G41/G42
-    
-    // Advanced Trajectory Smoothing & Error Compensation
+
+    // -------------------------------------------------------------------------
+    // MARK: Pierce & Cut Heights
+    // -------------------------------------------------------------------------
+
+    /// Torch standoff distance above the tube surface during the pierce phase (mm).
+    ///
+    /// A higher pierce height reduces dross ejected onto the nozzle and extends
+    /// consumable life, at the cost of a slightly larger pierce hole.  Values come
+    /// directly from the plasma unit's cut chart.
+    ///
+    /// Typical range: 3.0–6.4 mm (Hypertherm Powermax 65/85 charts).
+    /// - 6 mm mild steel / 65 A: 3.8 mm
+    /// - 3 mm mild steel / 45 A: 3.2 mm
+    var pierceHeight: CGFloat = 3.8
+
+    /// Torch standoff distance above the tube surface during steady-state cutting (mm).
+    ///
+    /// Directly controls arc voltage and therefore cut quality.  Lower than
+    /// recommended → top-side dross and shortened consumable life.  Higher →
+    /// underside bevel and incomplete fusion on thick material.
+    ///
+    /// Typical range: 1.5–4.8 mm (Hypertherm Powermax charts).
+    /// - 6 mm mild steel / 65 A: 3.2 mm
+    /// - 3 mm mild steel / 45 A: 2.4 mm
+    var cutHeight: CGFloat = 3.2
+
+    // -------------------------------------------------------------------------
+    // MARK: Kerf Compensation
+    // -------------------------------------------------------------------------
+
+    /// Full kerf width of the plasma arc (mm).
+    ///
+    /// The cut path is offset by half this value (kerfWidth / 2) to compensate for
+    /// material removed by the arc.  Measure empirically for your consumable and
+    /// material: make a calibration cut, measure the slot width with calipers.
+    ///
+    /// Typical range: 1.0–3.5 mm.
+    /// - Hypertherm 65 A fine-cut consumables on 3 mm steel: ~1.5 mm
+    /// - Hypertherm 65 A standard consumables on 6 mm steel: ~2.0–2.5 mm
+    var kerfWidth: CGFloat = 2.0
+
+    /// When `true`, applies kerf offset to the toolpath offline (geometric bisector
+    /// method in the X–A plane) instead of relying on controller G41/G42.
+    ///
+    /// Leave `true` for all standard use.  Disable only when post-processing for a
+    /// controller that applies its own G41/G42 and cannot accept a pre-offset path.
+    var enableKerfComp: Bool = true
+
+    // -------------------------------------------------------------------------
+    // MARK: Nonlinear Error Compensation
+    // -------------------------------------------------------------------------
+
+    /// When `true`, inserts additional intermediate machine points wherever the
+    /// linearised chord between two points deviates from the true tube surface by
+    /// more than `nonlinearErrorTolerance`.
+    ///
+    /// Increases point count (and file size) on tight-radius features but is
+    /// essential for accurate cuts on small-OD tube.  Disable only to reduce file
+    /// size for very large packs with simple sever cuts.
     var enableNonlinearErrorCompensation: Bool = true
-    var nonlinearErrorTolerance: CGFloat = 0.05 // mm (Max allowable chord deviation from true surface curve)
-    
-    // Singularity Avoidance (Damped Jacobian)
+
+    /// Maximum allowable deviation of the linear chord from the true tube surface
+    /// before an intermediate point is inserted (mm).
+    ///
+    /// Lower values produce smoother cuts and more G-code points.
+    ///
+    /// Typical range: 0.01–0.20 mm.
+    /// - Precision structural: 0.03–0.05 mm
+    /// - General fabrication: 0.10 mm
+    /// - Rough/structural cuts only: 0.20 mm
+    ///
+    /// Values below 0.01 mm approach floating-point noise and are not meaningful.
+    var nonlinearErrorTolerance: CGFloat = 0.05
+
+    // -------------------------------------------------------------------------
+    // MARK: Singularity Damping (Damped Jacobian)
+    // -------------------------------------------------------------------------
+
+    /// When `true`, applies a Damped Least Squares filter to A-axis motion at
+    /// points where the tube surface normal changes rapidly (e.g., HSS corners).
+    ///
+    /// Prevents the A axis from being commanded to accelerate beyond its physical
+    /// limits at corner transitions on rectangular stock.  Has no practical effect
+    /// on round tube where the normal rotates smoothly.
     var enableSingularityDamping: Bool = true
-    var singularityDampingFactor: CGFloat = 2.0 // λ (lambda) parameter. Higher = smoother A-axis but more torch tilt lag.
-    
-    // Advanced Geometric Lead-in
+
+    /// λ (lambda) damping factor for the Damped Least Squares A-axis filter.
+    ///
+    /// Controls the trade-off between torch-tilt accuracy and A-axis smoothness at
+    /// corners.  Higher values damp more aggressively: the torch tilts less
+    /// accurately through the corner but the A-axis motion is smoother and more
+    /// achievable by the motor.
+    ///
+    /// Formula: dampingRatio = ds² / (ds² + λ²).  At λ=0 the filter is off
+    /// (identical to `enableSingularityDamping = false`).
+    ///
+    /// Typical range: 0.5–5.0.
+    /// - Light damping (fast corner transitions): 0.5–1.0
+    /// - Balanced (recommended for most machines): 2.0
+    /// - Heavy damping (slow/stiff A-axis drives): 3.0–5.0
+    var singularityDampingFactor: CGFloat = 2.0
+
+    // -------------------------------------------------------------------------
+    // MARK: Lead-In Geometry
+    // -------------------------------------------------------------------------
+
+    /// Length of the straight entry segment that precedes the arc portion of the
+    /// lead-in (mm).
+    ///
+    /// The torch pierces at the far end of this segment and travels along it before
+    /// entering the arc.  Placing the pierce point away from the cut contour
+    /// prevents pierce-hole dross from ending up on the finished part edge.
+    ///
+    /// Typical range: 3–15 mm.  Values below 2 mm may not give the arc enough room.
+    /// Large values waste material on internal features with tight clearance.
     var leadInDistance: CGFloat = 5.0
-    var leadInAngle: CGFloat = 90.0 // Degrees of the sweep arc
-    var leadInAngleDistance: CGFloat = 3.0 // Radius of the sweep arc
-    
-    var overburnDegrees: CGFloat = 10.0  // Exact degrees to overburn
+
+    /// Angular sweep of the tangential arc lead-in (degrees).
+    ///
+    /// The arc blends the straight entry segment into the cut contour tangentially.
+    /// 90° produces a quarter-circle arc.  Values below ~30° produce an arc too
+    /// short to be useful; values above 180° risk the arc re-entering already-cut
+    /// material on small internal features.
+    ///
+    /// Typical range: 45–135°.
+    /// - Recommended for internal holes: 90°
+    /// - Recommended for sever cuts: 60–90°
+    var leadInAngle: CGFloat = 90.0
+
+    /// Radius of the tangential arc lead-in (mm).
+    ///
+    /// Smaller radius = tighter arc = less clearance needed inside the feature.
+    /// The arc must fit within the scrap-side material; on small holes, keep this
+    /// below ~30% of the hole radius.
+    ///
+    /// Typical range: 2–8 mm.
+    var leadInAngleDistance: CGFloat = 3.0
+
+    // -------------------------------------------------------------------------
+    // MARK: Overburn
+    // -------------------------------------------------------------------------
+
+    /// Angular distance the torch travels tangentially past the start/end of the
+    /// cut before torch-off (degrees of tube rotation).
+    ///
+    /// Overburn ensures the cut fully closes without a "notch" at the torch-off
+    /// point.  Too little → visible step/notch at closure.  Too much → scoring the
+    /// already-cut edge and unnecessary heat input.
+    ///
+    /// Typical range: 5–20°.
+    /// - Thin wall (≤3 mm): 5–8°
+    /// - Standard wall (4–6 mm): 8–12°
+    /// - Heavy wall (>6 mm): 12–20°
+    var overburnDegrees: CGFloat = 10.0
+
+    // -------------------------------------------------------------------------
+    // MARK: Controller Mode
+    // -------------------------------------------------------------------------
+
+    /// When `true`, generates SimCNC-compatible G94 "4D spoofed" feed rates.
+    ///
+    /// SimCNC interprets the F-word as a rate over the total Euclidean 4D machine
+    /// distance (√(ΔX²+ΔY²+ΔZ²+ΔA²)) rather than the 3D linear distance.  This
+    /// preserves the intended execution time for each segment across all four axes.
+    ///
+    /// Set `false` for standard Fanuc/LinuxCNC/Mach4 controllers, which interpret
+    /// F as the XYZ linear feed rate.
     var useSimCNC: Bool = true
-    var enableDynamicTHC: Bool = true    // Toggles automatic corner-locking for THC
-    
-    // Per-Axis Motor Acceleration Limits (mm/s^2 and degrees/s^2)
+
+    /// When `true`, injects M220 (THC OFF / corner lock) and M221 (THC ON) codes
+    /// at transitions between corner and flat regions of rectangular HSS.
+    ///
+    /// Prevents the Torch Height Controller from chasing the rapidly changing arc
+    /// voltage through HSS corner transitions, which would cause the torch to
+    /// incorrectly plunge or retract.  Has no effect on round tube (no corners).
+    ///
+    /// Requires a THC that supports M220/M221 (Mach4 with THC plugin, SimCNC THC,
+    /// Mesa THCAD-compatible setups).  Disable for THC systems that use a different
+    /// corner-lock protocol.
+    var enableDynamicTHC: Bool = true
+
+    // -------------------------------------------------------------------------
+    // MARK: Per-Axis Acceleration Limits
+    // -------------------------------------------------------------------------
+
+    /// Maximum acceleration of the X axis (tube axial / linear) (mm/s²).
+    ///
+    /// Used by the velocity profiler to compute junction speeds and acceleration
+    /// ramps.  Must match the value configured in the machine controller (Mach4
+    /// motor tuning / LinuxCNC INI `MAX_ACCELERATION`).  Setting too high produces
+    /// motor stalls or missed steps; too low leaves feed rate potential unused.
+    ///
+    /// Typical range: 200–2000 mm/s² (stepper) / 500–5000 mm/s² (servo).
     var maxAccelX: CGFloat = 500.0
+
+    /// Maximum acceleration of the Y axis (torch lateral) (mm/s²).
+    ///
+    /// Same constraints as `maxAccelX`.  The Y axis is rarely used in rotary
+    /// cutting (torch is centred over the tube axis) but is included for lead-in
+    /// arc moves.
+    ///
+    /// Typical range: 200–2000 mm/s².
     var maxAccelY: CGFloat = 500.0
+
+    /// Maximum acceleration of the Z axis (torch height) (mm/s²).
+    ///
+    /// The Z axis moves only during rapids, pierce descents, and retract sequences.
+    /// It does not move during steady-state cutting on round stock; on rectangular
+    /// stock it tracks the surface normal height variation.
+    ///
+    /// Typical range: 100–500 mm/s² (rack-and-pinion Z) / 200–1000 mm/s² (ball-screw Z).
     var maxAccelZ: CGFloat = 300.0
+
+    /// Maximum acceleration of the A axis (tube rotation) (degrees/s²).
+    ///
+    /// The A axis is typically a stepper-driven chuck or roller system with
+    /// significant inertia from the tube.  Values that are too high cause stepper
+    /// stalls or tube slippage in roller chucks.  Values that are too low reduce
+    /// attainable cut speed on round tube (the A axis is the primary cutting axis
+    /// for sever cuts).
+    ///
+    /// Typical range: 200–2000 °/s² (stepper chuck) / 500–5000 °/s² (servo chuck).
+    /// Note: 1000 °/s² ≈ 2.8 rev/s² — verify this is achievable with your chuck
+    /// inertia and driver current settings before using values above 1500 °/s².
     var maxAccelA: CGFloat = 1000.0
-    
-    // Global Thermal Sequencing
+
+    // -------------------------------------------------------------------------
+    // MARK: Thermal Hedging (Feature Sequencing)
+    // -------------------------------------------------------------------------
+
+    /// When `true`, reorders features to spread heat across the tube before
+    /// executing sever cuts.
+    ///
+    /// Internal features (holes, notches, cutouts) are sequenced first using a
+    /// nearest-neighbour traversal weighted by `thermalHedgingWeightX` and
+    /// `thermalHedgingWeightA`.  Sever cuts follow in right-to-left X order so
+    /// that cut-off sections fall away from work already in progress.
+    ///
+    /// Disable to use simple priority-based sequencing (endCut → internals →
+    /// startCut, right-to-left within each group), which produces shorter programs
+    /// but may concentrate heat at one end of the tube.
     var enableThermalHedging: Bool = true
+
+    /// Relative weight of axial (X) distance in the thermal-hedging nearest-
+    /// neighbour cost function.
+    ///
+    /// The travel cost between two features is:
+    ///   cost = √( (weightX·ΔX)² + (weightA·arcLen)² )
+    ///
+    /// Setting `thermalHedgingWeightX = 2.0` and `thermalHedgingWeightA = 1.0`
+    /// makes the sequencer prefer features that are closer axially, useful when
+    /// axial repositioning is slow relative to tube rotation.
+    ///
+    /// Typical range: 0.5–3.0.  Both weights at 1.0 gives equal cost per mm in
+    /// each direction.
     var thermalHedgingWeightX: CGFloat = 1.0
+
+    /// Relative weight of angular (A) arc-length distance in the thermal-hedging
+    /// nearest-neighbour cost function.
+    ///
+    /// Increase above 1.0 to prefer features that require less tube rotation to
+    /// reach (useful when the A axis is slow or the tube is heavy).  Decrease below
+    /// 1.0 to prioritise axial clustering.
+    ///
+    /// Typical range: 0.5–3.0.
     var thermalHedgingWeightA: CGFloat = 1.0
 }
 
 // MARK: - Machine TCP Data Structure
+
+/// A resolved 4-axis machine position for a single toolpath point.
+///
+/// Coordinates are in machine (controller) space:
+/// - `Xm`: axial position along the tube (mm)
+/// - `Ym`: torch lateral position, perpendicular to tube axis in the horizontal plane (mm)
+/// - `Zm`: torch height above the tube surface baseline (mm, relative)
+/// - `Am`: tube rotation angle (degrees, unbounded / continuous)
+///
+/// The `mat*` fields carry the intermediate material-space coordinates used by the
+/// nonlinear error compensation and velocity profiler.
 struct MachinePoint {
+    /// Axial machine position (mm).  Maps directly to the G-code X word.
     var Xm: CGFloat
+    /// Lateral machine position (mm).  Maps to the G-code Y word.
     var Ym: CGFloat
+    /// Height machine position, relative to tube surface baseline (mm).
+    /// Add `cutHeight` or `pierceHeight` when emitting G-code Z words.
     var Zm: CGFloat
+    /// Tube rotation angle (degrees, continuous / unbounded).
+    /// Maps to the G-code A word.
     var Am: CGFloat
+    /// Material-space axial coordinate (same as Xm in current kinematics).
     var matX: CGFloat
+    /// Material-space cross-section U coordinate (horizontal, perpendicular to tube axis) (mm).
     var matU: CGFloat
+    /// Material-space cross-section V coordinate (vertical, perpendicular to tube axis) (mm).
     var matV: CGFloat
+    /// `true` when the point lies on a corner region of rectangular HSS, used to
+    /// gate THC corner-lock injection and singularity damping.
     var isCorner: Bool
 }
 
 // MARK: - Velocity Profiling Segment
+
+/// Per-segment data produced by the velocity profiler.
+///
+/// One `TrajectorySegment` spans the move from `machinePoints[i]` to
+/// `machinePoints[i+1]`.  All delta fields are signed differences (end minus start).
 struct TrajectorySegment {
+    /// Arc-length of this segment on the true tube surface (mm).
+    /// Used as the canonical speed reference: surface speed = dS / dt.
     var dS: CGFloat
+    /// Euclidean 4D machine distance √(ΔXm²+ΔYm²+ΔZm²+ΔAm²).
+    /// Used to compute the SimCNC G94 spoofed feed rate F = dMachine / dt.
     var dMachine: CGFloat
+    /// X-axis displacement for this segment (mm).
     var dXm: CGFloat
+    /// Y-axis displacement for this segment (mm).
     var dYm: CGFloat
+    /// Z-axis displacement for this segment (mm).
     var dZm: CGFloat
+    /// A-axis displacement for this segment (degrees).
     var dAm: CGFloat
+    /// Maximum allowable tangential acceleration along the surface path for this
+    /// segment (mm/min²), derived from the most constrained individual axis.
     var aPath: CGFloat
+    /// Final output feed rate for this segment (mm/min), written to the F word.
+    /// Computed by the forward–backward velocity pass; 0.0 until profiling runs.
     var finalF: CGFloat = 0.0
 }
 
