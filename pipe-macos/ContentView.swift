@@ -16,13 +16,15 @@ extension UTType {
 
 struct ContentView: View {
     @StateObject private var viewModel = AppViewModel()
+    @ObservedObject private var presetManager = CutPresetManager.shared
     @State private var showingFilePicker = false
     @State private var showingSaveDialog = false
+    @State private var showingSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
-            ToolbarView(viewModel: viewModel)
+            ToolbarView(viewModel: viewModel, showSettings: $showingSettings)
 
             Divider()
 
@@ -79,6 +81,9 @@ struct ContentView: View {
                 print("Save error: \(error.localizedDescription)")
             }
         }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
     }
 
     private func setupNotifications() {
@@ -94,6 +99,8 @@ struct ContentView: View {
 
 struct ToolbarView: View {
     @ObservedObject var viewModel: AppViewModel
+    @Binding var showSettings: Bool
+    @ObservedObject private var presetManager = CutPresetManager.shared
 
     var body: some View {
         HStack(spacing: 12) {
@@ -114,6 +121,34 @@ struct ToolbarView: View {
             .frame(width: 160)
 
             Spacer()
+
+            // Active preset indicator
+            HStack(spacing: 4) {
+                Image(systemName: "flame")
+                    .foregroundColor(.orange)
+                    .font(.caption)
+                if let p = presetManager.activePreset {
+                    Text(p.name)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("·")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                    Text("\(Int(p.amperage))A")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("No preset selected")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Button(action: { showSettings = true }) {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("Settings")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
@@ -360,6 +395,7 @@ class AppViewModel: ObservableObject {
     func generatePackGCode(triggerSave: Bool = true) {
         guard let selected = selectedShape else { return }
         let allShapes = [selected] + matchingShapes
+        let activeSettings = CutPresetManager.shared.currentGCodeSettings()
         // Ascending: same order as buildPackScene — shortest left, longest right (first cut)
         let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) < ($1.stockInfo?.length ?? 0) }
 
@@ -388,6 +424,7 @@ class AppViewModel: ObservableObject {
         }
 
         let generator = GCodeGenerator()
+        generator.settings = activeSettings
         generatedGCode = generator.generatePackGCode(entries: entries)
         // Build simulation segments from the G-code so Start replays the actual toolpath
         simSegments = buildSimSegments(from: generatedGCode ?? "")
@@ -400,6 +437,7 @@ class AppViewModel: ObservableObject {
     // Update: Generates G-code for a selected shape with roll alignment
     func generateGCode(for shape: SelectedShape) {
         let generator = GCodeGenerator()
+        generator.settings = CutPresetManager.shared.currentGCodeSettings()
         
         guard let stockInfo = shape.stockInfo else {
             print("Cannot generate G-code: No stock information available")

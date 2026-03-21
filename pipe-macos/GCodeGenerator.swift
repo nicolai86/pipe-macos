@@ -17,7 +17,8 @@ struct GCodeSettings {
     var feedRate: CGFloat = 1000.0 // mm/min
     var rapidRate: CGFloat = 3000.0 // mm/min
     var safeHeight: CGFloat = 25.0 // mm
-    var cutHeight: CGFloat = 1.5 // mm
+    var pierceHeight: CGFloat = 3.8 // mm — standoff during pierce, from Hypertherm cut charts
+    var cutHeight: CGFloat = 3.2 // mm
     
     // Kerf & Comp
     var kerfWidth: CGFloat = 2.0 // mm
@@ -485,7 +486,8 @@ class GCodeGenerator {
         
         let pierceMp = machinePoints[0]
         lines.append("G0 X\(fmt(pierceMp.Xm)) Y\(fmt(pierceMp.Ym)) A\(fmt(pierceMp.Am))")
-        lines.append("G0 Z\(fmt(pierceMp.Zm + settings.safeHeight))")
+        lines.append("G0 Z\(fmt(pierceMp.Zm + settings.safeHeight))  ; safe height")
+        lines.append("G0 Z\(fmt(pierceMp.Zm + settings.pierceHeight)) ; lower to pierce height")
         lines.append("M3 S1                         ; torch on")
 
         // Executing the Profiled Trajectory + Dynamic G41/G42 Injection
