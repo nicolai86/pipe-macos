@@ -236,6 +236,11 @@ class AppViewModel: ObservableObject {
     private var simTimer: Timer?
     private var simTotalLength: Float = 0
     private var simStockRadius: Float = 30.0
+    private var simTorchHeight: Float = 16.0
+    /// Angular offset (radians) added to the stock rotation so A=0 in the G-code
+    /// corresponds to the uAxis direction facing world +Y (the torch).
+    /// Derived from q1 (axis-alignment rotation only) for both round and HSS stock.
+    private var simA0Offset: Float = 0
     private var simSegments: [SimSegment] = []
     private var simSegmentIdx: Int = 0
     private var simSegmentElapsed: Float = 0  // seconds into current segment (in real-time units)
@@ -480,22 +485,29 @@ class AppViewModel: ObservableObject {
         let totalLength = packX > gap ? packX - gap : packX
         simTotalLength  = totalLength
         simStockRadius  = maxCross / 2.0
+        simTorchHeight  = maxCross * 0.3  // scale torch size with stock
 
-        // Torch: a downward-pointing cone fixed in scene space (not in stockGroup).
-        // Positioned at the RIGHT end of the stock (where cutting starts).
-        let torchHeight: Float = 16.0
-        let torchCone = SCNCone(topRadius: CGFloat(maxCross * 0.08), bottomRadius: 0, height: CGFloat(torchHeight))
+        // Compute angular offset so G-code A=0 maps to uAxis facing world +Y (toward torch).
+        // Uses q1 only (axis-alignment, no roll correction) — unified for both round and HSS.
+        if let refStock = sorted.first?.stockInfo,
+           simd_length(refStock.uAxis) > 0.001 {
+            let q1_ref = alignAxisToX(refStock.axis)
+            let rotatedU = q1_ref.act(normalize(refStock.uAxis))
+            simA0Offset = -atan2(rotatedU.z, rotatedU.y)
+        } else {
+            simA0Offset = 0
+        }
+
+        // Torch cone: tip (bottomRadius=0) points toward tube, fat end away.
+        // Position/orientation are set dynamically by applySimState — just create the node here.
+        let torchCone = SCNCone(topRadius: CGFloat(maxCross * 0.08), bottomRadius: 0, height: CGFloat(simTorchHeight))
         let torchMat = SCNMaterial()
         torchMat.diffuse.contents  = NSColor(red: 1.0, green: 0.75, blue: 0.1, alpha: 1.0)
-        torchMat.emission.contents = NSColor(red: 0.4, green: 0.2,  blue: 0.0, alpha: 1.0)
+        torchMat.emission.contents = NSColor.black
         torchMat.isDoubleSided = true
         torchCone.materials = [torchMat]
         let torchNode = SCNNode(geometry: torchCone)
         torchNode.name = "torch"
-        // SCNCone with topRadius=fat, bottomRadius=0: tip is at -height/2 in local Y.
-        // We want tip to sit just above stock surface (Y = maxCross/2 + 2).
-        let tipY = maxCross / 2.0 + 2.0
-        torchNode.position = SCNVector3(CGFloat(totalLength), CGFloat(tipY + torchHeight / 2.0), 0)
         scene.rootNode.addChildNode(torchNode)
 
         // Camera: look at full initial stock range, torch on the right
@@ -510,6 +522,8 @@ class AppViewModel: ObservableObject {
         scene.rootNode.addChildNode(cameraNode)
 
         packScene = scene
+        // Position the torch at the initial "parked" state (free end, retracted)
+        applySimState(gcodeX: simTotalLength, gcodeA: 0, torchOn: false)
     }
 
     // MARK: - Simulation
@@ -570,11 +584,23 @@ class AppViewModel: ObservableObject {
     private func applySimState(gcodeX: Float, gcodeA: Float, torchOn: Bool) {
         guard let scene = packScene,
               let stockGroup = scene.rootNode.childNode(withName: "stockGroup", recursively: false) else { return }
-        // Torch is fixed at simTotalLength in scene space; stock moves so torch appears at gcodeX
+
+        // Stock moves axially so the cut point (gcodeX in pack space) lines up with the
+        // fixed torch position (simTotalLength in scene space).
         stockGroup.position = SCNVector3(simTotalLength - gcodeX, 0, 0)
-        stockGroup.eulerAngles = SCNVector3(gcodeA * Float.pi / 180.0, 0, 0)
-        // Light up torch when cutting
+        // Stock rotates so the cut surface faces the torch.
+        stockGroup.eulerAngles = SCNVector3(-gcodeA * Float.pi / 180.0 + simA0Offset, 0, 0)
+
+        // Torch is fixed in scene space — stationary at X=simTotalLength, directly above the
+        // tube axis. Only Y changes to show retracted (safe height) vs descending to cut.
         if let torchNode = scene.rootNode.childNode(withName: "torch", recursively: false) {
+            let settings = GCodeSettings()
+            let standoff: Float = torchOn ? Float(settings.cutHeight) : Float(settings.safeHeight)
+            // Tip is at (simStockRadius + standoff) above tube axis; cone centre is half-height further
+            let centreY = simStockRadius + standoff + simTorchHeight / 2.0
+            torchNode.position = SCNVector3(CGFloat(simTotalLength), CGFloat(centreY), 0)
+            // Cone always points straight down — eulerAngles stay at zero
+            torchNode.eulerAngles = SCNVector3(0, 0, 0)
             torchNode.geometry?.firstMaterial?.emission.contents = torchOn
                 ? NSColor(red: 1.0, green: 0.4, blue: 0.0, alpha: 1.0)
                 : NSColor.black
