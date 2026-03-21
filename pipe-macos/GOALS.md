@@ -30,6 +30,9 @@ Smart Packing Workspace: Upon selecting a target stock profile, the software aut
 
 Dynamic Nesting: The Pack View acts as the absolute source of truth for G-Code generation. Users can seamlessly add, remove, or modify part quantities, with all changes instantly reflected in the 3D packing model.
 
+ Dual-Loop THC Conflict Management (The Square Tube Problem): 
+    Disable THC for the rotation of HSS tubes so that the system avoids jittering the torch into the workpiece
+
 ## Advanced Rotary Kinematics Engine (2026 SOTA)
 Because standard controllers like SimCNC do not natively support Inverse Time Feedrate (G93) or true Tool Center Point (TCP) for rotary axes, Pipe macOS handles all advanced trajectory planning offline:
 
