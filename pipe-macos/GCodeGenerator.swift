@@ -14,15 +14,28 @@ struct PackEntry {
 
 // MARK: - GCode Generation Settings
 struct GCodeSettings {
-    var feedRate: CGFloat = 1000.0
-    var rapidRate: CGFloat = 3000.0
-    var safeHeight: CGFloat = 25.0
-    var cutHeight: CGFloat = 1.5
-    var kerfWidth: CGFloat = 2.0
+    var feedRate: CGFloat = 1000.0 // mm/min
+    var rapidRate: CGFloat = 3000.0 // mm/min
+    var safeHeight: CGFloat = 25.0 // mm
+    var cutHeight: CGFloat = 1.5 // mm
+    
+    // Kerf & Comp
+    var kerfWidth: CGFloat = 2.0 // mm
     var enableKerfComp: Bool = true
+    
+    // Advanced Geometric Lead-in
     var leadInDistance: CGFloat = 5.0
+    var leadInAngle: CGFloat = 90.0 // Degrees of the sweep arc
+    var leadInAngleDistance: CGFloat = 3.0 // Radius of the sweep arc
+    
     var overburnDegrees: CGFloat = 10.0  // Exact degrees to overburn
     var useSimCNC: Bool = true
+    
+    // Per-Axis Motor Acceleration Limits (mm/s^2 and degrees/s^2)
+    var maxAccelX: CGFloat = 500.0
+    var maxAccelY: CGFloat = 500.0
+    var maxAccelZ: CGFloat = 300.0
+    var maxAccelA: CGFloat = 1000.0
 }
 
 // MARK: - Machine TCP Data Structure
@@ -34,6 +47,16 @@ struct MachinePoint {
     var matX: CGFloat
     var matU: CGFloat
     var matV: CGFloat
+}
+
+// MARK: - Velocity Profiling Segment
+struct TrajectorySegment {
+    var dS: CGFloat
+    var dt: CGFloat
+    var dMachine: CGFloat
+    var rawF: CGFloat
+    var fwdF: CGFloat = 0.0
+    var finalF: CGFloat = 0.0
 }
 
 // MARK: - GCode Generator
@@ -139,25 +162,184 @@ class GCodeGenerator {
     ) -> ([String], CGFloat) {
         guard let localPath = feature.path, localPath.count > 1 else { return ([], currentA) }
 
-        // Shift path to pack space and apply roll offset
         let packPath = localPath.map { ToolpathPoint(x: $0.x + packStartX, a: $0.a + rollOffset) }
 
-        // Shift everything by the nearest multiple of 360° to minimise A-axis travel
         let rawPierceA = packPath[0].a
         let shift = round((currentA - rawPierceA) / 360.0) * 360.0
-        let adjPath = packPath.map { ToolpathPoint(x: $0.x, a: $0.a + shift) }
+        var adjPath = packPath.map { ToolpathPoint(x: $0.x, a: $0.a + shift) }
+        
+        let OD: CGFloat = stock.profile == .round ? (stock.od ?? 50.0) : max(stock.odX ?? 50.0, stock.odY ?? 50.0)
+        let k = (.pi * OD) / 360.0 // Conversion factor: degrees to mm surface distance
 
-        // Apply exact mathematical overburn directly to the Toolpath points
-        var finalPath = adjPath
-        var finalA = adjPath.last!.a
-        if feature.type == .startCut || feature.type == .endCut {
-            finalA = finalA + settings.overburnDegrees
-            finalPath.append(ToolpathPoint(x: adjPath.last!.x, a: finalA))
-        } else if (feature.type == .hole || feature.type == .cutout) && adjPath.count > 1 {
-            let dir: CGFloat = (adjPath[1].a - adjPath[0].a) >= 0 ? 1 : -1
-            finalA = finalA + dir * settings.overburnDegrees
-            finalPath.append(ToolpathPoint(x: adjPath.last!.x, a: finalA))
+        var isInternal = false
+        if feature.type == .hole || feature.type == .cutout || feature.type == .notch {
+            isInternal = true
         }
+
+        // ====================================================================
+        // --- SOTA PIERCE POINT OPTIMIZATION (LONGEST SEGMENT) ---
+        // ====================================================================
+        
+        if isInternal && adjPath.count > 2 {
+            var maxLen: CGFloat = -1
+            var bestIdx = 0
+            
+            for i in 0..<adjPath.count - 1 {
+                let dx = adjPath[i+1].x - adjPath[i].x
+                let da_mm = (adjPath[i+1].a - adjPath[i].a) * k
+                let len = sqrt(dx*dx + da_mm*da_mm)
+                if len > maxLen { maxLen = len; bestIdx = i }
+            }
+            
+            let midX = (adjPath[bestIdx].x + adjPath[bestIdx+1].x) / 2.0
+            let midA = (adjPath[bestIdx].a + adjPath[bestIdx+1].a) / 2.0
+            let midPt = ToolpathPoint(x: midX, a: midA)
+            
+            var newPath: [ToolpathPoint] = [midPt]
+            newPath.append(contentsOf: adjPath[(bestIdx+1)..<(adjPath.count - 1)])
+            newPath.append(contentsOf: adjPath[0...bestIdx])
+            newPath.append(midPt)
+            
+            var continuousPath = [newPath[0]]
+            for i in 1..<newPath.count {
+                var currA = newPath[i].a
+                let prevA = continuousPath.last!.a
+                while currA - prevA > 180.0 { currA -= 360.0 }
+                while currA - prevA < -180.0 { currA += 360.0 }
+                continuousPath.append(ToolpathPoint(x: newPath[i].x, a: currA))
+            }
+            adjPath = continuousPath
+        } else if (feature.type == .startCut || feature.type == .endCut) && adjPath.count > 1 {
+            // Sever Cuts: Retain snap-to-face-center logic
+            var bestIdx = 0
+            var minDiff = CGFloat.greatestFiniteMagnitude
+            for (i, pt) in adjPath.enumerated() {
+                let modA = abs(pt.a.truncatingRemainder(dividingBy: 90.0))
+                let diff = min(modA, 90.0 - modA)
+                if diff < minDiff { minDiff = diff; bestIdx = i }
+            }
+            
+            if bestIdx > 0 {
+                var corePath = adjPath
+                if abs(corePath.last!.a - (corePath.first!.a + 360.0)) < 1.0 { corePath.removeLast() }
+                
+                let reordered = Array(corePath[bestIdx...]) + Array(corePath[..<bestIdx])
+                var newPath: [ToolpathPoint] = [reordered[0]]
+                for i in 1..<reordered.count {
+                    var current_A = reordered[i].a
+                    let prev_A = newPath.last!.a
+                    while current_A - prev_A > 180.0 { current_A -= 360.0 }
+                    while current_A - prev_A < -180.0 { current_A += 360.0 }
+                    newPath.append(ToolpathPoint(x: reordered[i].x, a: current_A))
+                }
+                
+                let firstPt = newPath.first!
+                var closeA = firstPt.a
+                let lastA = newPath.last!.a
+                while closeA - lastA > 180.0 { closeA -= 360.0 }
+                while closeA - lastA < -180.0 { closeA += 360.0 }
+                newPath.append(ToolpathPoint(x: firstPt.x, a: closeA))
+                adjPath = newPath
+            }
+        }
+
+        var finalPath = adjPath
+        
+        // ====================================================================
+        // --- CHIRALITY-AWARE PLASMA SWIRL ENGINE ---
+        // ====================================================================
+        
+        var signedArea: CGFloat = 0
+        for i in 0..<finalPath.count - 1 {
+            let p_i = finalPath[i]
+            let p_next = finalPath[i+1]
+            signedArea += (p_i.x * (p_next.a * k) - p_next.x * (p_i.a * k))
+        }
+
+        // --- THE FIX: DYNAMIC SCRAP-SIDE MULTIPLIER ---
+        var isScrapLeft = false
+        var compCode = "G42"
+
+        if isInternal {
+            // Internal cut: Force CW in machine space. Scrap is on the Right.
+            if signedArea > 0 { finalPath.reverse() }
+            isScrapLeft = false
+            compCode = "G42"
+        } else {
+            // Sever Cuts: Force CCW in machine space. Scrap is on the Left.
+            if feature.type == .startCut {
+                if finalPath.last!.a < finalPath.first!.a { finalPath.reverse() }
+                isScrapLeft = true
+                compCode = "G41"
+            } else if feature.type == .endCut {
+                if finalPath.last!.a > finalPath.first!.a { finalPath.reverse() }
+                isScrapLeft = true
+                compCode = "G41"
+            }
+        }
+
+        // 3. TANGENTIAL Overburn (Lead-Out Fix)
+        if finalPath.count > 2 {
+            let overburnDist = settings.overburnDegrees * k
+            let pLast = finalPath.last!
+            let pPrev = finalPath[finalPath.count - 2]
+            
+            let dx = pLast.x - pPrev.x
+            let da_mm = (pLast.a - pPrev.a) * k
+            let len = sqrt(dx*dx + da_mm*da_mm)
+            
+            if len > 0.001 {
+                let dirX = dx / len
+                let dirA_mm = da_mm / len
+                let obX = pLast.x + dirX * overburnDist
+                let obA_mm = (pLast.a * k) + dirA_mm * overburnDist
+                finalPath.append(ToolpathPoint(x: obX, a: obA_mm / k))
+            }
+        }
+
+        // 4. Generate Geometric Scrap-Side Lead-In
+        let p0 = finalPath[0]
+        let p1 = finalPath.count > 1 ? finalPath[1] : ToolpathPoint(x: p0.x + 1, a: p0.a)
+        
+        let dx = p1.x - p0.x
+        let da_mm = (p1.a - p0.a) * k
+        let gamma = atan2(da_mm, dx) // Initial cut tangent direction
+        
+        let leadR = settings.leadInAngleDistance
+        let leadTheta = settings.leadInAngle * .pi / 180.0
+        let leadL = settings.leadInDistance
+        
+        // Dynamically invert the tangent logic based on true scrap location
+        let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
+        
+        var leadInPoints: [ToolpathPoint] = []
+        
+        if leadTheta > 0.01 && leadR > 0.01 {
+            // Center of arc is guaranteed to be in the Scrap Zone
+            let Cx = p0.x + leadR * cos(gamma + sideMultiplier * .pi / 2.0)
+            let Cy = (p0.a * k) + leadR * sin(gamma + sideMultiplier * .pi / 2.0)
+            
+            let arrivalAngle = gamma - sideMultiplier * .pi / 2.0
+            let startAngle = arrivalAngle - sideMultiplier * leadTheta
+            
+            let arcSteps = max(4, Int(leadTheta * 180 / .pi / 15)) // Dynamic segmenting
+            for i in 0..<arcSteps {
+                let t = startAngle + sideMultiplier * (leadTheta * CGFloat(i) / CGFloat(arcSteps))
+                let x_arc = Cx + leadR * cos(t)
+                let y_arc = Cy + leadR * sin(t)
+                leadInPoints.append(ToolpathPoint(x: x_arc, a: y_arc / k))
+            }
+        }
+        
+        // Straight extension backing out of the tangent arc start
+        let firstArcPt = leadInPoints.first ?? p0
+        let entryTangent = gamma - sideMultiplier * leadTheta
+        let pierceX = firstArcPt.x - leadL * cos(entryTangent)
+        let pierceY = (firstArcPt.a * k) - leadL * sin(entryTangent)
+        
+        leadInPoints.insert(ToolpathPoint(x: pierceX, a: pierceY / k), at: 0)
+        finalPath.insert(contentsOf: leadInPoints, at: 0)
+
 
         // --- Kinematic Mapping (Tool Center Point) ---
         var machinePoints: [MachinePoint] = []
@@ -166,7 +348,6 @@ class GCodeGenerator {
         for pt in finalPath {
             var mp = convertToMachine(pt: pt, stock: stock)
             
-            // Continuous A-axis unwrapping (prevents violent 360 degree whips)
             if let prev = prevAm {
                 while mp.Am - prev > 180.0 { mp.Am -= 360.0 }
                 while mp.Am - prev < -180.0 { mp.Am += 360.0 }
@@ -179,73 +360,113 @@ class GCodeGenerator {
             machinePoints.append(mp)
         }
 
-        // Calculate Pierce Point dynamically based on feature type
-        var piercePt2D = ToolpathPoint(x: adjPath[0].x, a: adjPath[0].a)
-        if feature.type == .startCut {
-            piercePt2D.x -= settings.leadInDistance
-        } else if feature.type == .endCut {
-            piercePt2D.x += settings.leadInDistance
-        } else if feature.type == .hole || feature.type == .cutout {
-            piercePt2D = ToolpathPoint(x: feature.xCenter + packStartX, a: feature.aCenterDeg + rollOffset + shift)
-        } else if feature.type == .notch {
-            piercePt2D.x = feature.xCenter < stock.length / 2 ? packStartX - settings.leadInDistance : packEndX + settings.leadInDistance
-        }
-
-        var pierceMp = convertToMachine(pt: piercePt2D, stock: stock)
-        while pierceMp.Am - machinePoints[0].Am > 180.0 { pierceMp.Am -= 360.0 }
-        while pierceMp.Am - machinePoints[0].Am < -180.0 { pierceMp.Am += 360.0 }
-
-        // --- G-Code Output Generation ---
-        var lines: [String] = []
-        lines.append("; --- \(feature.type.rawValue.capitalized)  X=\(fmt(feature.xCenter + packStartX))mm  A=\(fmt(feature.aCenterDeg + rollOffset))° ---")
-        lines.append("; Offline TCP Engaged: Y/Z interpolated, G94 Velocity Profiled")
+        // ====================================================================
+        // --- PER-AXIS LOOK-AHEAD VELOCITY PROFILING ---
+        // ====================================================================
         
-        // 1. Rapid to pierce coordinates & safe height
-        lines.append("G0 X\(fmt(pierceMp.Xm)) Y\(fmt(pierceMp.Ym)) A\(fmt(pierceMp.Am))")
-        lines.append("G0 Z\(fmt(pierceMp.Zm + settings.safeHeight))")
-        lines.append("M3 S1                         ; torch on")
-        lines.append("G1 Z\(fmt(pierceMp.Zm + settings.cutHeight)) F\(fmt(settings.feedRate * 0.5)) ; plunge to cut height")
-
-        // 2. Lead-in move to first point (with G94 velocity)
-        let pt0 = machinePoints[0]
-        let pt0_dS = sqrt(pow(pt0.matX - pierceMp.matX, 2) + pow(pt0.matU - pierceMp.matU, 2) + pow(pt0.matV - pierceMp.matV, 2))
-        let pt0_dt = pt0_dS / settings.feedRate
-        let pt0_dM = sqrt(pow(pt0.Xm - pierceMp.Xm, 2) + pow(pt0.Ym - pierceMp.Ym, 2) + pow(pt0.Zm - pierceMp.Zm, 2) + pow(pt0.Am - pierceMp.Am, 2))
-        var pt0_F = settings.feedRate
-        if pt0_dt > 1e-6 { pt0_F = min(pt0_dM / pt0_dt, settings.rapidRate) }
-        lines.append("G1 X\(fmt(pt0.Xm)) Y\(fmt(pt0.Ym)) Z\(fmt(pt0.Zm + settings.cutHeight)) A\(fmt(pt0.Am)) F\(fmt(pt0_F))")
-
-        // 3. Main Contour Execution with SimCNC Feedrate spoofing
+        var segments: [TrajectorySegment] = []
+        
+        let aMaxX = settings.maxAccelX * 3600.0
+        let aMaxY = settings.maxAccelY * 3600.0
+        let aMaxZ = settings.maxAccelZ * 3600.0
+        let aMaxA = settings.maxAccelA * 3600.0
+        
         for i in 1..<machinePoints.count {
             let prev = machinePoints[i-1]
             let curr = machinePoints[i]
 
-            // Calculate true surface distance moved (Material Space)
             let dx = curr.matX - prev.matX
             let du = curr.matU - prev.matU
             let dv = curr.matV - prev.matV
             let dS = sqrt(dx*dx + du*du + dv*dv)
 
-            // Calculate required execution time to maintain cut chart speed
             let dt = dS / settings.feedRate
 
-            // Calculate physical 4-axis machine distance SimCNC thinks it is moving
-            let dXm = curr.Xm - prev.Xm
-            let dYm = curr.Ym - prev.Ym
-            let dZm = curr.Zm - prev.Zm
-            let dAm = curr.Am - prev.Am
+            let dXm = abs(curr.Xm - prev.Xm)
+            let dYm = abs(curr.Ym - prev.Ym)
+            let dZm = abs(curr.Zm - prev.Zm)
+            let dAm = abs(curr.Am - prev.Am)
             let dMachine = sqrt(dXm*dXm + dYm*dYm + dZm*dZm + dAm*dAm)
 
-            // Spoof G94 Feedrate
-            var fG94 = settings.feedRate
+            var rawF = settings.feedRate
             if dt > 1e-6 {
-                fG94 = min(dMachine / dt, settings.rapidRate) // Clamp max velocity to prevent corner aliasing spikes
+                rawF = min(dMachine / dt, settings.rapidRate)
             }
-
-            lines.append("G1 X\(fmt(curr.Xm)) Y\(fmt(curr.Ym)) Z\(fmt(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmt(fG94))")
+            
+            segments.append(TrajectorySegment(dS: dS, dt: dt, dMachine: dMachine, rawF: rawF))
         }
 
-        lines.append("M5                            ; torch off")
+        if !segments.isEmpty {
+            segments[0].fwdF = segments[0].rawF
+            for i in 1..<segments.count {
+                let dMachine = segments[i].dMachine
+                let dXm = abs(machinePoints[i+1].Xm - machinePoints[i].Xm)
+                let dYm = abs(machinePoints[i+1].Ym - machinePoints[i].Ym)
+                let dZm = abs(machinePoints[i+1].Zm - machinePoints[i].Zm)
+                let dAm = abs(machinePoints[i+1].Am - machinePoints[i].Am)
+                
+                let limitA_X = dXm > 1e-6 ? aMaxX * dMachine / dXm : .greatestFiniteMagnitude
+                let limitA_Y = dYm > 1e-6 ? aMaxY * dMachine / dYm : .greatestFiniteMagnitude
+                let limitA_Z = dZm > 1e-6 ? aMaxZ * dMachine / dZm : .greatestFiniteMagnitude
+                let limitA_A = dAm > 1e-6 ? aMaxA * dMachine / dAm : .greatestFiniteMagnitude
+                
+                let effectiveAccel = min(limitA_X, limitA_Y, limitA_Z, limitA_A)
+
+                let physLimit = sqrt(pow(segments[i-1].fwdF, 2) + (2.0 * effectiveAccel * dMachine))
+                segments[i].fwdF = min(segments[i].rawF, physLimit)
+            }
+            
+            let lastIdx = segments.count - 1
+            segments[lastIdx].finalF = segments[lastIdx].fwdF
+            for i in stride(from: lastIdx - 1, through: 0, by: -1) {
+                let dMachine = segments[i].dMachine
+                let dXm = abs(machinePoints[i+1].Xm - machinePoints[i].Xm)
+                let dYm = abs(machinePoints[i+1].Ym - machinePoints[i].Ym)
+                let dZm = abs(machinePoints[i+1].Zm - machinePoints[i].Zm)
+                let dAm = abs(machinePoints[i+1].Am - machinePoints[i].Am)
+                
+                let limitA_X = dXm > 1e-6 ? aMaxX * dMachine / dXm : .greatestFiniteMagnitude
+                let limitA_Y = dYm > 1e-6 ? aMaxY * dMachine / dYm : .greatestFiniteMagnitude
+                let limitA_Z = dZm > 1e-6 ? aMaxZ * dMachine / dZm : .greatestFiniteMagnitude
+                let limitA_A = dAm > 1e-6 ? aMaxA * dMachine / dAm : .greatestFiniteMagnitude
+                
+                let effectiveAccel = min(limitA_X, limitA_Y, limitA_Z, limitA_A)
+
+                let physLimit = sqrt(pow(segments[i+1].finalF, 2) + (2.0 * effectiveAccel * dMachine))
+                segments[i].finalF = min(segments[i].fwdF, physLimit)
+            }
+        }
+
+        // --- G-Code Output Generation ---
+        var lines: [String] = []
+        let typeStr = feature.type.rawValue.capitalized
+        let directionStr = isInternal ? "CW (Physical CCW)" : "CCW (Physical CW)"
+        lines.append("; --- \(typeStr)  X=\(fmt(feature.xCenter + packStartX))mm  A=\(fmt(feature.aCenterDeg + rollOffset))° ---")
+        lines.append("; TCP Active | Swirl Comp: \(directionStr) | Tangential OB | Comp: \(compCode)")
+        
+        let pierceMp = machinePoints[0]
+        lines.append("G0 X\(fmt(pierceMp.Xm)) Y\(fmt(pierceMp.Ym)) A\(fmt(pierceMp.Am))")
+        lines.append("G0 Z\(fmt(pierceMp.Zm + settings.safeHeight))")
+        lines.append("M3 S1                         ; torch on")
+
+        // Executing the Profiled Trajectory + Dynamic G41/G42 Injection
+        for i in 1..<machinePoints.count {
+            let curr = machinePoints[i]
+            let seg = segments[i-1]
+            
+            var cmdPrefix = "G1 "
+            
+            // Apply Kerf Comp strictly on the first linear interpolated lead-in move
+            if i == 1 && settings.enableKerfComp {
+                cmdPrefix = "G1 \(compCode) "
+            }
+            
+            lines.append("\(cmdPrefix)X\(fmt(curr.Xm)) Y\(fmt(curr.Ym)) Z\(fmt(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmt(seg.finalF))")
+        }
+
+        // Torch Off and G40 Cancel
+        let g40Cancel = settings.enableKerfComp ? "G40 " : ""
+        lines.append("M5 \(g40Cancel)                         ; torch off & cancel kerf comp")
         return (lines, machinePoints.last!.Am)
     }
 
@@ -312,7 +533,7 @@ class GCodeGenerator {
                 }
             }
             
-            // Failsafe (should never trigger unless bad math)
+            // Failsafe
             if bestT == .greatestFiniteMagnitude { return (0, H/2, 0, 1) }
             
             return (bestU, bestV, bestNu, bestNv)
@@ -322,16 +543,12 @@ class GCodeGenerator {
     private func convertToMachine(pt: ToolpathPoint, stock: StockInfo) -> MachinePoint {
         let profile = getProfilePoint(angleDeg: pt.a, stock: stock)
         
-        // Theta is the A-axis rotation required to point the surface normal straight UP (+Z)
         let thetaRad = atan2(profile.Nu, profile.Nv)
 
-        // Machine Kinematics Calculation
         let Ym = profile.u * cos(thetaRad) - profile.v * sin(thetaRad)
         let Zm = profile.u * sin(thetaRad) + profile.v * cos(thetaRad)
         let machineA = thetaRad * 180.0 / .pi
 
-        // Offset Zm so Z=0 perfectly aligns with the top surface of the unrotated stock.
-        // This preserves standard machine zeroing workflows.
         let baselineZ: CGFloat
         if stock.profile == .round {
             baselineZ = (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
