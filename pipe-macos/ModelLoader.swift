@@ -54,11 +54,14 @@ class StockInfo: Codable {
     var odY: CGFloat?
     var length: CGFloat
     var axis: SIMD3<Float>
+    /// Cross-section "up" axis — one of the face normal directions perpendicular to axis.
+    /// Used in pack view to roll all pieces to the same orientation.
+    var uAxis: SIMD3<Float>
     var origin: SIMD3<Float>
     var features: [SurfaceFeature] = []
 
-    init(profile: StockProfile, od: CGFloat? = nil, odX: CGFloat? = nil, odY: CGFloat? = nil, length: CGFloat, axis: SIMD3<Float>, origin: SIMD3<Float>) {
-        self.profile = profile; self.od = od; self.odX = odX; self.odY = odY; self.length = length; self.axis = axis; self.origin = origin
+    init(profile: StockProfile, od: CGFloat? = nil, odX: CGFloat? = nil, odY: CGFloat? = nil, length: CGFloat, axis: SIMD3<Float>, uAxis: SIMD3<Float>, origin: SIMD3<Float>) {
+        self.profile = profile; self.od = od; self.odX = odX; self.odY = odY; self.length = length; self.axis = axis; self.uAxis = uAxis; self.origin = origin
     }
 }
 
@@ -333,6 +336,7 @@ class ModelLoader {
             odY: isRectangular ? CGFloat(trueCrossMin) : nil,
             length: CGFloat(trueLength),
             axis: tubeAxis,
+            uAxis: uAxis,
             origin: trueCenter
         )
 
