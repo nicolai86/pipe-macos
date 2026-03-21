@@ -224,6 +224,11 @@ struct SimSegment {
     let realDuration: Float // real-world seconds for this segment (speed multiplier applied separately)
 }
 
+struct ShapeOverride {
+    var enabled: Bool = true
+    var quantity: Int = 1
+}
+
 class AppViewModel: ObservableObject {
     @Published var loadedModel: Model3D?
     @Published var selectedShape: SelectedShape?
@@ -231,6 +236,7 @@ class AppViewModel: ObservableObject {
     @Published var generatedGCode: String?
     @Published var viewMode: ViewMode = .solid
     @Published var packScene: SCNScene?
+    @Published var shapeOverrides: [UUID: ShapeOverride] = [:]
     @Published var simRunning = false
     @Published var simSpeedMultiplier: Float = 10.0  // 1× = real time, 10× = 10 times faster
     private var simTimer: Timer?
@@ -268,6 +274,24 @@ class AppViewModel: ObservableObject {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    func shapeOverride(for shape: SelectedShape) -> ShapeOverride {
+        shapeOverrides[shape.id] ?? ShapeOverride()
+    }
+
+    func setEnabled(_ enabled: Bool, for shape: SelectedShape) {
+        var o = shapeOverride(for: shape)
+        o.enabled = enabled
+        shapeOverrides[shape.id] = o
+        buildPackScene()
+    }
+
+    func setQuantity(_ qty: Int, for shape: SelectedShape) {
+        var o = shapeOverride(for: shape)
+        o.quantity = max(1, qty)
+        shapeOverrides[shape.id] = o
+        buildPackScene()
     }
 
     // Called from the main thread (gesture recognizer callback) — no async dispatch needed.
@@ -320,6 +344,7 @@ class AppViewModel: ObservableObject {
                 self.matchingShapes = []
                 self.generatedGCode = nil
                 self.packScene = nil
+                self.shapeOverrides = [:]
                 self.loadedModel = model
             }
         } else {
@@ -342,7 +367,8 @@ class AppViewModel: ObservableObject {
         var packX: CGFloat = 0
         var entries: [PackEntry] = []
         for shape in sorted {
-            guard let stock = shape.stockInfo else { continue }
+            let ov = shapeOverride(for: shape)
+            guard ov.enabled, let stock = shape.stockInfo else { continue }
             let len = stock.length
 
             // Calculate the roll offset for each piece in the pack
@@ -354,8 +380,11 @@ class AppViewModel: ObservableObject {
                 rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
             }
 
-            entries.append(PackEntry(shape: shape, packStartX: packX, rollOffset: rollDeg))
-            packX += len + gap
+            let qty = max(1, ov.quantity)
+            for _ in 0..<qty {
+                entries.append(PackEntry(shape: shape, packStartX: packX, rollOffset: rollDeg))
+                packX += len + gap
+            }
         }
 
         let generator = GCodeGenerator()
@@ -438,8 +467,10 @@ class AppViewModel: ObservableObject {
         stockGroup.name = "stockGroup"
         scene.rootNode.addChildNode(stockGroup)
 
-        for (idx, shape) in sorted.enumerated() {
-            guard let stock = shape.stockInfo,
+        var nodeIdx = 0
+        for shape in sorted {
+            let ov = shapeOverride(for: shape)
+            guard ov.enabled, let stock = shape.stockInfo,
                   let geometry = shape.node?.geometry else { continue }
 
             let length = Float(stock.length)
@@ -455,31 +486,37 @@ class AppViewModel: ObservableObject {
             }
 
             let origVerts = extractVertices(from: geometry)
-            var newVerts: [SCNVector3] = []
-            for v in origVerts {
-                let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
-                let centered = p - stock.origin
-                let rotated = q.act(centered)
-                let placed = rotated + SIMD3<Float>(packX + length / 2.0, 0, 0)
-                newVerts.append(SCNVector3(CGFloat(placed.x), CGFloat(placed.y), CGFloat(placed.z)))
-            }
-
             let faces = extractFaces(from: geometry)
-            let packGeometry = SCNGeometry(vertices: newVerts, faces: faces)
-            let mat = SCNMaterial()
-            mat.isDoubleSided = true
-            mat.diffuse.contents = shape == selected
-                ? NSColor.orange
-                : NSColor(red: 0.0, green: 0.7, blue: 1.0, alpha: 1.0)
-            packGeometry.materials = [mat]
-
-            let node = SCNNode(geometry: packGeometry)
-            node.name = "pack_\(idx)"
-            stockGroup.addChildNode(node)
-
             let cross = max(Float(stock.odX ?? stock.od ?? 0), Float(stock.odY ?? stock.od ?? 0))
             maxCross = max(maxCross, cross)
-            packX += length + gap
+            let isSelected = (shape == selected)
+
+            let qty = max(1, ov.quantity)
+            for _ in 0..<qty {
+                var newVerts: [SCNVector3] = []
+                for v in origVerts {
+                    let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+                    let centered = p - stock.origin
+                    let rotated = q.act(centered)
+                    let placed = rotated + SIMD3<Float>(packX + length / 2.0, 0, 0)
+                    newVerts.append(SCNVector3(CGFloat(placed.x), CGFloat(placed.y), CGFloat(placed.z)))
+                }
+
+                let packGeometry = SCNGeometry(vertices: newVerts, faces: faces)
+                let mat = SCNMaterial()
+                mat.isDoubleSided = true
+                mat.diffuse.contents = isSelected
+                    ? NSColor.orange
+                    : NSColor(red: 0.0, green: 0.7, blue: 1.0, alpha: 1.0)
+                packGeometry.materials = [mat]
+
+                let node = SCNNode(geometry: packGeometry)
+                node.name = "pack_\(nodeIdx)"
+                nodeIdx += 1
+                stockGroup.addChildNode(node)
+
+                packX += length + gap
+            }
         }
 
         let totalLength = packX > gap ? packX - gap : packX
@@ -765,7 +802,11 @@ struct PackView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                             Spacer()
-                            let n = viewModel.matchingShapes.count + 1
+                            let allShapes = viewModel.selectedShape.map { [$0] + viewModel.matchingShapes } ?? []
+                            let n = allShapes.reduce(0) { acc, s in
+                                let ov = viewModel.shapeOverride(for: s)
+                                return acc + (ov.enabled ? max(1, ov.quantity) : 0)
+                            }
                             Text("← longest on right (\(n) piece\(n == 1 ? "" : "s"))")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -848,9 +889,17 @@ struct PackInfoView: View {
     }
 
     private var totalStockLength: CGFloat {
-        let pieceSum = sortedShapes.compactMap { $0.stockInfo?.length }.reduce(0, +)
-        let gaps = CGFloat(max(0, sortedShapes.count - 1)) * Self.packGap
-        return pieceSum + gaps
+        var total: CGFloat = 0
+        var count = 0
+        for shape in sortedShapes {
+            let ov = viewModel.shapeOverride(for: shape)
+            guard ov.enabled, let len = shape.stockInfo?.length else { continue }
+            let qty = max(1, ov.quantity)
+            total += len * CGFloat(qty)
+            count += qty
+        }
+        let gaps = CGFloat(max(0, count - 1)) * Self.packGap
+        return total + gaps
     }
 
     var body: some View {
@@ -863,24 +912,51 @@ struct PackInfoView: View {
 
                 Divider()
 
-                ForEach(Array(sortedShapes.enumerated()), id: \.offset) { idx, shape in
+                ForEach(sortedShapes) { shape in
                     if let len = shape.stockInfo?.length {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(shape == viewModel.selectedShape
-                                    ? Color.orange
-                                    : Color(red: 0, green: 0.7, blue: 1.0))
-                                .frame(width: 6, height: 6)
-                            Text(String(format: "%.1f mm", len))
-                                .font(.system(.caption, design: .monospaced))
-                            Spacer()
+                        let ov = viewModel.shapeOverride(for: shape)
+                        let enabledBinding = Binding<Bool>(
+                            get: { viewModel.shapeOverride(for: shape).enabled },
+                            set: { viewModel.setEnabled($0, for: shape) }
+                        )
+                        let qtyBinding = Binding<Int>(
+                            get: { viewModel.shapeOverride(for: shape).quantity },
+                            set: { viewModel.setQuantity($0, for: shape) }
+                        )
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 4) {
+                                Toggle("", isOn: enabledBinding)
+                                    .toggleStyle(.checkbox)
+                                    .labelsHidden()
+                                    .controlSize(.mini)
+                                Circle()
+                                    .fill(shape == viewModel.selectedShape
+                                        ? Color.orange
+                                        : Color(red: 0, green: 0.7, blue: 1.0))
+                                    .frame(width: 6, height: 6)
+                                Text(String(format: "%.1f mm", len))
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(ov.enabled ? .primary : .secondary)
+                                    .strikethrough(!ov.enabled)
+                                Spacer()
+                                Text("\(ov.quantity)×")
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundColor(ov.enabled ? .primary : .secondary)
+                                    .frame(width: 20, alignment: .trailing)
+                                Stepper("", value: qtyBinding, in: 1...99)
+                                    .labelsHidden()
+                                    .controlSize(.mini)
+                                    .disabled(!ov.enabled)
+                            }
+                            if ov.enabled && ov.quantity > 1 {
+                                Text(String(format: "×%d = %.1f mm", ov.quantity, len * CGFloat(ov.quantity)))
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .padding(.leading, 20)
+                            }
                         }
-                        if idx < sortedShapes.count - 1 {
-                            Text(String(format: "+%.0f mm gap", Self.packGap))
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundColor(.secondary)
-                                .padding(.leading, 10)
-                        }
+                        .padding(.vertical, 1)
                     }
                 }
 
