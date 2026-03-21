@@ -31,6 +31,7 @@ struct GCodeSettings {
     
     var overburnDegrees: CGFloat = 10.0  // Exact degrees to overburn
     var useSimCNC: Bool = true
+    var enableDynamicTHC: Bool = true    // Toggles automatic corner-locking for THC
     
     // Per-Axis Motor Acceleration Limits (mm/s^2 and degrees/s^2)
     var maxAccelX: CGFloat = 500.0
@@ -48,6 +49,7 @@ struct MachinePoint {
     var matX: CGFloat
     var matU: CGFloat
     var matV: CGFloat
+    var isCorner: Bool
 }
 
 // MARK: - Velocity Profiling Segment
@@ -493,10 +495,32 @@ class GCodeGenerator {
         lines.append("G0 Z\(fmt(pierceMp.Zm + settings.pierceHeight)) ; lower to pierce height")
         lines.append("M3 S1                         ; torch on")
 
+        // Track the current THC state to inject toggles smoothly
+        var currentTHCState = true
+        if settings.enableDynamicTHC {
+            if pierceMp.isCorner {
+                lines.append("#1060=0 M220                  ; THC OFF (Corner Lock)")
+                currentTHCState = false
+            } else {
+                lines.append("#1060=1 M220                  ; THC ON (Flat Segment)")
+            }
+        }
+
         // Executing the Profiled Trajectory + Dynamic G41/G42 Injection
         for i in 1..<machinePoints.count {
             let curr = machinePoints[i]
             let seg = segments[i-1]
+            
+            // Apply Dynamic THC Control
+            if settings.enableDynamicTHC {
+                if curr.isCorner && currentTHCState {
+                    lines.append("#1060=0 M220                  ; THC OFF (Corner Lock)")
+                    currentTHCState = false
+                } else if !curr.isCorner && !currentTHCState {
+                    lines.append("#1060=1 M220                  ; THC ON (Flat Segment)")
+                    currentTHCState = true
+                }
+            }
             
             var cmdPrefix = "G1 "
             
@@ -594,14 +618,20 @@ class GCodeGenerator {
         let machineA = thetaRad * 180.0 / .pi
 
         let baselineZ: CGFloat
+        let isCorner: Bool
+        
         if stock.profile == .round {
             baselineZ = (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
+            isCorner = false
         } else {
             baselineZ = (stock.odY ?? stock.od ?? 50.0) / 2.0
+            // Flat faces have normals strictly aligned with U or V axes (1 or -1)
+            let isFlat = abs(profile.Nu) > 0.999 || abs(profile.Nv) > 0.999
+            isCorner = !isFlat
         }
         let relativeZm = Zm - baselineZ
 
-        return MachinePoint(Xm: pt.x, Ym: Ym, Zm: relativeZm, Am: machineA, matX: pt.x, matU: profile.u, matV: profile.v)
+        return MachinePoint(Xm: pt.x, Ym: Ym, Zm: relativeZm, Am: machineA, matX: pt.x, matU: profile.u, matV: profile.v, isCorner: isCorner)
     }
 
     // MARK: - Utilities

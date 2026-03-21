@@ -25,6 +25,7 @@ struct AdvancedSettings: Codable {
     var overburnDegrees: Double = 10.0
     var enableKerfComp: Bool = true
     var useSimCNC: Bool = true
+    var enableDynamicTHC: Bool = true
     var maxAccelX: Double = 500.0
     var maxAccelY: Double = 500.0
     var maxAccelZ: Double = 300.0
@@ -68,6 +69,7 @@ class CutPresetManager: ObservableObject {
         s.overburnDegrees     = CGFloat(advancedSettings.overburnDegrees)
         s.enableKerfComp      = advancedSettings.enableKerfComp
         s.useSimCNC           = advancedSettings.useSimCNC
+        s.enableDynamicTHC    = advancedSettings.enableDynamicTHC
         s.maxAccelX           = CGFloat(advancedSettings.maxAccelX)
         s.maxAccelY           = CGFloat(advancedSettings.maxAccelY)
         s.maxAccelZ           = CGFloat(advancedSettings.maxAccelZ)
