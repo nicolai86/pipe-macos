@@ -52,10 +52,12 @@ struct MachinePoint {
 // MARK: - Velocity Profiling Segment
 struct TrajectorySegment {
     var dS: CGFloat
-    var dt: CGFloat
     var dMachine: CGFloat
-    var rawF: CGFloat
-    var fwdF: CGFloat = 0.0
+    var dXm: CGFloat
+    var dYm: CGFloat
+    var dZm: CGFloat
+    var dAm: CGFloat
+    var aPath: CGFloat
     var finalF: CGFloat = 0.0
 }
 
@@ -256,7 +258,7 @@ class GCodeGenerator {
             signedArea += (p_i.x * (p_next.a * k) - p_next.x * (p_i.a * k))
         }
 
-        // --- THE FIX: DYNAMIC SCRAP-SIDE MULTIPLIER ---
+        // --- DYNAMIC SCRAP-SIDE MULTIPLIER ---
         var isScrapLeft = false
         var compCode = "G42"
 
@@ -361,16 +363,18 @@ class GCodeGenerator {
         }
 
         // ====================================================================
-        // --- PER-AXIS LOOK-AHEAD VELOCITY PROFILING ---
+        // --- SOTA: NON-LINEAR KINEMATIC JACOBIAN VELOCITY PROFILING ---
         // ====================================================================
         
         var segments: [TrajectorySegment] = []
         
+        // Convert acceleration limits to mm/min^2 (and deg/min^2) for G94 compatibility
         let aMaxX = settings.maxAccelX * 3600.0
         let aMaxY = settings.maxAccelY * 3600.0
         let aMaxZ = settings.maxAccelZ * 3600.0
         let aMaxA = settings.maxAccelA * 3600.0
         
+        // 1. Calculate Raw Segment Distances & Tangential Acceleration Limits
         for i in 1..<machinePoints.count {
             let prev = machinePoints[i-1]
             let curr = machinePoints[i]
@@ -378,63 +382,91 @@ class GCodeGenerator {
             let dx = curr.matX - prev.matX
             let du = curr.matU - prev.matU
             let dv = curr.matV - prev.matV
-            let dS = sqrt(dx*dx + du*du + dv*dv)
+            let dS = max(1e-6, sqrt(dx*dx + du*du + dv*dv)) // Ensure non-zero to prevent Div/0
 
-            let dt = dS / settings.feedRate
-
-            let dXm = abs(curr.Xm - prev.Xm)
-            let dYm = abs(curr.Ym - prev.Ym)
-            let dZm = abs(curr.Zm - prev.Zm)
-            let dAm = abs(curr.Am - prev.Am)
+            let dXm = curr.Xm - prev.Xm
+            let dYm = curr.Ym - prev.Ym
+            let dZm = curr.Zm - prev.Zm
+            let dAm = curr.Am - prev.Am
             let dMachine = sqrt(dXm*dXm + dYm*dYm + dZm*dZm + dAm*dAm)
 
-            var rawF = settings.feedRate
-            if dt > 1e-6 {
-                rawF = min(dMachine / dt, settings.rapidRate)
-            }
+            // Calculate the maximum linear acceleration allowable along the path surface
+            let limitA_X = abs(dXm) > 1e-6 ? aMaxX * dS / abs(dXm) : .greatestFiniteMagnitude
+            let limitA_Y = abs(dYm) > 1e-6 ? aMaxY * dS / abs(dYm) : .greatestFiniteMagnitude
+            let limitA_Z = abs(dZm) > 1e-6 ? aMaxZ * dS / abs(dZm) : .greatestFiniteMagnitude
+            let limitA_A = abs(dAm) > 1e-6 ? aMaxA * dS / abs(dAm) : .greatestFiniteMagnitude
+
+            let aPath = min(limitA_X, limitA_Y, limitA_Z, limitA_A)
             
-            segments.append(TrajectorySegment(dS: dS, dt: dt, dMachine: dMachine, rawF: rawF))
+            segments.append(TrajectorySegment(dS: dS, dMachine: dMachine, dXm: dXm, dYm: dYm, dZm: dZm, dAm: dAm, aPath: aPath))
         }
 
-        if !segments.isEmpty {
-            segments[0].fwdF = segments[0].rawF
+        // 2. Calculate Junction Speed Limits (The Non-Linear Jacobian Derivative)
+        // This solves for centripetal-equivalent cornering forces based on 2nd derivatives.
+        var vJunction = [CGFloat](repeating: settings.feedRate, count: machinePoints.count)
+
+        if segments.count > 1 {
             for i in 1..<segments.count {
-                let dMachine = segments[i].dMachine
-                let dXm = abs(machinePoints[i+1].Xm - machinePoints[i].Xm)
-                let dYm = abs(machinePoints[i+1].Ym - machinePoints[i].Ym)
-                let dZm = abs(machinePoints[i+1].Zm - machinePoints[i].Zm)
-                let dAm = abs(machinePoints[i+1].Am - machinePoints[i].Am)
-                
-                let limitA_X = dXm > 1e-6 ? aMaxX * dMachine / dXm : .greatestFiniteMagnitude
-                let limitA_Y = dYm > 1e-6 ? aMaxY * dMachine / dYm : .greatestFiniteMagnitude
-                let limitA_Z = dZm > 1e-6 ? aMaxZ * dMachine / dZm : .greatestFiniteMagnitude
-                let limitA_A = dAm > 1e-6 ? aMaxA * dMachine / dAm : .greatestFiniteMagnitude
-                
-                let effectiveAccel = min(limitA_X, limitA_Y, limitA_Z, limitA_A)
+                let prev = segments[i-1]
+                let curr = segments[i]
 
-                let physLimit = sqrt(pow(segments[i-1].fwdF, 2) + (2.0 * effectiveAccel * dMachine))
-                segments[i].fwdF = min(segments[i].rawF, physLimit)
-            }
-            
-            let lastIdx = segments.count - 1
-            segments[lastIdx].finalF = segments[lastIdx].fwdF
-            for i in stride(from: lastIdx - 1, through: 0, by: -1) {
-                let dMachine = segments[i].dMachine
-                let dXm = abs(machinePoints[i+1].Xm - machinePoints[i].Xm)
-                let dYm = abs(machinePoints[i+1].Ym - machinePoints[i].Ym)
-                let dZm = abs(machinePoints[i+1].Zm - machinePoints[i].Zm)
-                let dAm = abs(machinePoints[i+1].Am - machinePoints[i].Am)
-                
-                let limitA_X = dXm > 1e-6 ? aMaxX * dMachine / dXm : .greatestFiniteMagnitude
-                let limitA_Y = dYm > 1e-6 ? aMaxY * dMachine / dYm : .greatestFiniteMagnitude
-                let limitA_Z = dZm > 1e-6 ? aMaxZ * dMachine / dZm : .greatestFiniteMagnitude
-                let limitA_A = dAm > 1e-6 ? aMaxA * dMachine / dAm : .greatestFiniteMagnitude
-                
-                let effectiveAccel = min(limitA_X, limitA_Y, limitA_Z, limitA_A)
+                let dS_avg = (prev.dS + curr.dS) / 2.0
+                if dS_avg < 1e-6 { continue }
 
-                let physLimit = sqrt(pow(segments[i+1].finalF, 2) + (2.0 * effectiveAccel * dMachine))
-                segments[i].finalF = min(segments[i].fwdF, physLimit)
+                // Rate of change of axis position per unit surface distance
+                let rPrevX = prev.dXm / prev.dS, rCurrX = curr.dXm / curr.dS
+                let rPrevY = prev.dYm / prev.dS, rCurrY = curr.dYm / curr.dS
+                let rPrevZ = prev.dZm / prev.dS, rCurrZ = curr.dZm / curr.dS
+                let rPrevA = prev.dAm / prev.dS, rCurrA = curr.dAm / curr.dS
+
+                // Second derivative (change in rate)
+                let drX = abs(rCurrX - rPrevX)
+                let drY = abs(rCurrY - rPrevY)
+                let drZ = abs(rCurrZ - rPrevZ)
+                let drA = abs(rCurrA - rPrevA)
+
+                // Max surface velocity allowed by instantaneous axis direction changes
+                let vLimX = drX > 1e-6 ? sqrt(aMaxX * dS_avg / drX) : .greatestFiniteMagnitude
+                let vLimY = drY > 1e-6 ? sqrt(aMaxY * dS_avg / drY) : .greatestFiniteMagnitude
+                let vLimZ = drZ > 1e-6 ? sqrt(aMaxZ * dS_avg / drZ) : .greatestFiniteMagnitude
+                let vLimA = drA > 1e-6 ? sqrt(aMaxA * dS_avg / drA) : .greatestFiniteMagnitude
+
+                let minCornerV = min(vLimX, vLimY, vLimZ, vLimA)
+                vJunction[i] = min(settings.feedRate, minCornerV)
             }
+        }
+
+        // 3. The Forward Pass (Acceleration Limits)
+        var vFwd = [CGFloat](repeating: 0.0, count: machinePoints.count)
+        vFwd[0] = vJunction[0]
+
+        for i in 0..<segments.count {
+            let seg = segments[i]
+            let vExitLimit = sqrt(pow(vFwd[i], 2) + 2.0 * seg.aPath * seg.dS)
+            vFwd[i+1] = min(vExitLimit, vJunction[i+1])
+        }
+
+        // 4. The Backward Pass (Deceleration Pre-planning)
+        var vFinal = [CGFloat](repeating: 0.0, count: machinePoints.count)
+        vFinal[segments.count] = vFwd[segments.count]
+
+        for i in stride(from: segments.count - 1, through: 0, by: -1) {
+            let seg = segments[i]
+            let vEntryLimit = sqrt(pow(vFinal[i+1], 2) + 2.0 * seg.aPath * seg.dS)
+            vFinal[i] = min(vFwd[i], vEntryLimit)
+        }
+
+        // 5. Convert Safe Surface Speeds to SimCNC G94 4D Spoofed Feedrates
+        for i in 0..<segments.count {
+            // Take the average safe surface speed across this segment
+            var vSafe = (vFinal[i] + vFinal[i+1]) / 2.0
+            if vSafe < 1.0 { vSafe = 1.0 } // Protect against full dead-stops causing div/0
+
+            // Convert to execution time, then back up to SimCNC machine vector feedrate
+            let dt = segments[i].dS / vSafe
+            let fG94 = dt > 1e-6 ? segments[i].dMachine / dt : settings.rapidRate
+
+            segments[i].finalF = min(fG94, settings.rapidRate)
         }
 
         // --- G-Code Output Generation ---

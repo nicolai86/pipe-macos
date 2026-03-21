@@ -19,7 +19,8 @@
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRepAdaptor_Curve.hxx>
-#include <GCPnts_UniformDeflection.hxx>
+#include <GCPnts_UniformAbscissa.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_CylindricalSurface.hxx>
@@ -200,17 +201,27 @@
                         
                         NSMutableArray *edgePoints = [NSMutableArray array];
                         BRepAdaptor_Curve curve(edge);
-                        GCPnts_UniformDeflection defl(curve, 0.1);
                         
-                        if (defl.IsDone()) {
+                        // SOTA UPGRADE: Uniform Arc-Length Discretization
+                        Standard_Real edgeLength = GCPnts_AbscissaPoint::Length(curve);
+                        
+                        // Calculate integer number of points to yield exactly ~1.0mm spacing without micro-segments at ends
+                        Standard_Integer nbPts = (Standard_Integer)std::ceil(edgeLength / 1.0) + 1;
+                        if (nbPts < 2) nbPts = 2; // Guarantee at least endpoints
+                        
+                        GCPnts_UniformAbscissa abscissa(curve, nbPts, 1.e-3);
+                        
+                        if (abscissa.IsDone()) {
                             if (edge.Orientation() == TopAbs_FORWARD) {
-                                for (int i = 1; i <= defl.NbPoints(); ++i) {
-                                    gp_Pnt p = defl.Value(i);
+                                for (int i = 1; i <= abscissa.NbPoints(); ++i) {
+                                    Standard_Real t = abscissa.Parameter(i);
+                                    gp_Pnt p = curve.Value(t);
                                     [edgePoints addObject:@{@"x": @(p.X()), @"y": @(p.Y()), @"z": @(p.Z())}];
                                 }
                             } else {
-                                for (int i = defl.NbPoints(); i >= 1; --i) {
-                                    gp_Pnt p = defl.Value(i);
+                                for (int i = abscissa.NbPoints(); i >= 1; --i) {
+                                    Standard_Real t = abscissa.Parameter(i);
+                                    gp_Pnt p = curve.Value(t);
                                     [edgePoints addObject:@{@"x": @(p.X()), @"y": @(p.Y()), @"z": @(p.Z())}];
                                 }
                             }
