@@ -41,6 +41,10 @@ struct GCodeSettings {
     var kerfWidth: CGFloat = 2.0 // mm
     var enableKerfComp: Bool = true
     
+    // Advanced Trajectory Smoothing & Error Compensation
+    var enableNonlinearErrorCompensation: Bool = true
+    var nonlinearErrorTolerance: CGFloat = 0.05 // mm (Max allowable chord deviation from true surface curve)
+    
     // Advanced Geometric Lead-in
     var leadInDistance: CGFloat = 5.0
     var leadInAngle: CGFloat = 90.0 // Degrees of the sweep arc
@@ -477,23 +481,65 @@ class GCodeGenerator {
         finalPath.insert(contentsOf: leadInPoints, at: 0)
 
 
-        // --- Kinematic Mapping (Tool Center Point) ---
+        // ====================================================================
+        // --- SOTA: DUAL-CHORD NONLINEAR ERROR COMPENSATION & TCP MAPPING ---
+        // ====================================================================
         var machinePoints: [MachinePoint] = []
         var prevAm: CGFloat? = nil
 
-        for pt in finalPath {
+        func getWrappedMachinePoint(pt: ToolpathPoint, refAm: CGFloat?) -> MachinePoint {
             var mp = convertToMachine(pt: pt, stock: stock)
             
-            if let prev = prevAm {
+            if let prev = refAm {
                 while mp.Am - prev > 180.0 { mp.Am -= 360.0 }
                 while mp.Am - prev < -180.0 { mp.Am += 360.0 }
             } else if isPackMode {
                 while mp.Am - currentA > 180.0 { mp.Am -= 360.0 }
                 while mp.Am - currentA < -180.0 { mp.Am += 360.0 }
             }
+            return mp
+        }
+
+        if !finalPath.isEmpty {
+            let firstPt = finalPath[0]
+            let firstMp = getWrappedMachinePoint(pt: firstPt, refAm: prevAm)
+            prevAm = firstMp.Am
+            machinePoints.append(firstMp)
             
-            prevAm = mp.Am
-            machinePoints.append(mp)
+            for i in 1..<finalPath.count {
+                let startPt = finalPath[i-1]
+                let endPt = finalPath[i]
+                
+                func appendWithCompensation(sPt: ToolpathPoint, ePt: ToolpathPoint, sMp: MachinePoint, depth: Int = 0) {
+                    let eMp = getWrappedMachinePoint(pt: ePt, refAm: sMp.Am)
+                    
+                    if settings.enableNonlinearErrorCompensation && depth < 10 {
+                        // 1. True kinematic midpoint (parametric material space mapped to machine space)
+                        let midPt = ToolpathPoint(x: (sPt.x + ePt.x) / 2.0, a: (sPt.a + ePt.a) / 2.0)
+                        let trueMidMp = getWrappedMachinePoint(pt: midPt, refAm: sMp.Am)
+                        
+                        // 2. Linear interpolation midpoint (how the controller will physically move)
+                        let linMidY = (sMp.Ym + eMp.Ym) / 2.0
+                        let linMidZ = (sMp.Zm + eMp.Zm) / 2.0
+                        
+                        // 3. Calculate deviation strictly in the non-linear axes (Y and Z)
+                        let dy = trueMidMp.Ym - linMidY
+                        let dz = trueMidMp.Zm - linMidZ
+                        let deviation = sqrt(dy*dy + dz*dz)
+                        
+                        // 4. Bisect if physical chord error exceeds tolerance
+                        if deviation > settings.nonlinearErrorTolerance {
+                            appendWithCompensation(sPt: sPt, ePt: midPt, sMp: sMp, depth: depth + 1)
+                            appendWithCompensation(sPt: midPt, ePt: ePt, sMp: machinePoints.last!, depth: depth + 1)
+                            return
+                        }
+                    }
+                    
+                    machinePoints.append(eMp)
+                }
+                
+                appendWithCompensation(sPt: startPt, ePt: endPt, sMp: machinePoints.last!)
+            }
         }
 
         // ====================================================================

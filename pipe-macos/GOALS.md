@@ -56,6 +56,8 @@ Tangential Overburn: Replaces standard rotational overburn with a purely tangent
 
 Hierarchical B-Rep Topological Extraction: Bypasses distance-guessing edge stitchers by maintaining strict OpenCASCADE wire continuity, ensuring complex features spanning multiple faces are flawlessly stitched without jumping kerf gaps.
 
+Dual-Chord Nonlinear Error Compensation: When you generate a G01 line that involves simultaneous X, Y, Z, and A movement, SimCNC interpolates the motors linearly. However, because the A-axis is rotating, the physical path the plasma arc cuts into the steel is a complex curve, not a straight line. This "nonlinear error" causes undercutting or overcutting on complex pipe intersections (like saddle joints), even if the start and end points of the G-code block are perfectly accurate.
+
 ## SimCNC Integration
 The G-code output is heavily optimized for SimCNC's specific operational constraints:
 
