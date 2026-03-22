@@ -11,7 +11,7 @@ struct SettingsView: View {
     @State private var tab: Tab = .presets
     @State private var searchText = ""
 
-    enum Tab { case presets, advanced }
+    enum Tab { case presets, advanced, display }
 
     private func matches(_ preset: CutPreset) -> Bool {
         guard !searchText.isEmpty else { return true }
@@ -30,6 +30,7 @@ struct SettingsView: View {
             Picker("", selection: $tab) {
                 Text("Cut Presets").tag(Tab.presets)
                 Text("Advanced").tag(Tab.advanced)
+                Text("Display").tag(Tab.display)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -40,6 +41,7 @@ struct SettingsView: View {
             switch tab {
             case .presets:  presetsTab
             case .advanced: advancedTab
+            case .display:  displayTab
             }
 
             Divider()
@@ -49,6 +51,7 @@ struct SettingsView: View {
                 Button("OK") {
                     manager.savePresets()
                     manager.saveAdvanced()
+                    manager.saveDisplay()
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
@@ -238,6 +241,32 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
                     .frame(width: 44, alignment: .leading)
             }
+        }
+    }
+
+    // MARK: - Display Tab
+
+    private var displayTab: some View {
+        ScrollView {
+            Form {
+                Section {
+                    Picker("Background", selection: $manager.displaySettings.viewBackground) {
+                        Text("Dark").tag(ViewBackground.dark)
+                        Text("Light").tag(ViewBackground.light)
+                    }
+                    .pickerStyle(.radioGroup)
+                    .onChange(of: manager.displaySettings.viewBackground) { _ in
+                        manager.saveDisplay()
+                    }
+                } header: {
+                    AdvancedSectionHeader(
+                        title: "3D Viewport",
+                        info: "Controls the background colour of the 3D model view. Dark is easier on the eyes in low-light environments and makes the axis indicators stand out clearly. Light is useful in bright rooms or when taking screenshots for documentation."
+                    )
+                }
+            }
+            .formStyle(.grouped)
+            .padding(.horizontal)
         }
     }
 

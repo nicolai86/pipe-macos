@@ -14,6 +14,17 @@ struct CutPreset: Codable, Identifiable, Equatable {
     var pierceHeight: Double // mm
 }
 
+// MARK: - Display Settings
+
+enum ViewBackground: String, Codable {
+    case dark
+    case light
+}
+
+struct DisplaySettings: Codable {
+    var viewBackground: ViewBackground = .dark
+}
+
 // MARK: - Advanced Settings (all GCodeSettings fields that aren't preset-specific)
 
 struct AdvancedSettings: Codable {
@@ -54,6 +65,7 @@ class CutPresetManager: ObservableObject {
         }
     }
     @Published var advancedSettings: AdvancedSettings = AdvancedSettings()
+    @Published var displaySettings: DisplaySettings = DisplaySettings()
 
     var activePreset: CutPreset? {
         presets.first { $0.id == activePresetID }
@@ -115,6 +127,12 @@ class CutPresetManager: ObservableObject {
             advancedSettings = decoded
         }
 
+        let displayURL = appSupportURL.appendingPathComponent("display_settings.json")
+        if let data = try? Data(contentsOf: displayURL),
+           let decoded = try? JSONDecoder().decode(DisplaySettings.self, from: data) {
+            displaySettings = decoded
+        }
+
         // Restore active preset selection — fall back to first if saved ID is gone
         if let saved = UserDefaults.standard.string(forKey: "activePresetID"),
            let uuid = UUID(uuidString: saved),
@@ -135,6 +153,13 @@ class CutPresetManager: ObservableObject {
     func saveAdvanced() {
         let url = appSupportURL.appendingPathComponent("advanced_settings.json")
         if let data = try? JSONEncoder().encode(advancedSettings) {
+            try? data.write(to: url)
+        }
+    }
+
+    func saveDisplay() {
+        let url = appSupportURL.appendingPathComponent("display_settings.json")
+        if let data = try? JSONEncoder().encode(displaySettings) {
             try? data.write(to: url)
         }
     }

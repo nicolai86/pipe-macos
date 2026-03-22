@@ -12,7 +12,8 @@ struct Model3DView: View {
 
 struct SceneKitView: NSViewRepresentable {
     @ObservedObject var viewModel: AppViewModel
-    
+    @ObservedObject var displayManager = CutPresetManager.shared
+
     func makeNSView(context: Context) -> SCNView {
         let scnView = SCNView()
         scnView.scene = SCNScene()
@@ -83,6 +84,11 @@ struct SceneKitView: NSViewRepresentable {
                 node.geometry?.firstMaterial?.fillMode = .fill
             }
         }
+        switch displayManager.displaySettings.viewBackground {
+        case .dark:  scnView.backgroundColor = NSColor(white: 0.1, alpha: 1.0)
+        case .light: scnView.backgroundColor = NSColor(white: 0.85, alpha: 1.0)
+        }
+
         scnView.needsDisplay = true
     }
     
