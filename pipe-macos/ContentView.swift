@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var showingFilePicker = false
     @State private var showingSaveDialog = false
     @State private var showingSettings = false
+    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 300
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,17 +30,24 @@ struct ContentView: View {
             Divider()
 
             // Main content
-            HSplitView {
+            HStack(spacing: 0) {
                 // 3D View
                 Model3DView(viewModel: viewModel)
                     .frame(minWidth: 400)
 
+                ResizableDivider(
+                    width: Binding(get: { CGFloat(sidebarWidth) },
+                                   set: { sidebarWidth = Double($0) }),
+                    minWidth: 200,
+                    maxWidth: 600
+                )
+
                 // Side panel
                 SidePanelView(viewModel: viewModel)
-                    .frame(width: 300)
+                    .frame(width: CGFloat(sidebarWidth))
             }
 
-            PackView(viewModel: viewModel)
+            PackView(viewModel: viewModel, sidebarWidth: CGFloat(sidebarWidth))
         }
         .frame(minWidth: 800, minHeight: 500)
         .background(Color(NSColor.windowBackgroundColor))
@@ -825,8 +833,44 @@ class AppViewModel: ObservableObject {
 
 // MARK: - Pack View
 
+// MARK: - Resizable Divider
+
+struct ResizableDivider: View {
+    @Binding var width: CGFloat
+    let minWidth: CGFloat
+    let maxWidth: CGFloat
+
+    @State private var dragStartWidth: CGFloat? = nil
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(NSColor.separatorColor))
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
+            .overlay(
+                Color.clear
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        if hovering { NSCursor.resizeLeftRight.push() }
+                        else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                if dragStartWidth == nil { dragStartWidth = width }
+                                let proposed = (dragStartWidth ?? width) - value.translation.width
+                                width = max(minWidth, min(maxWidth, proposed))
+                            }
+                            .onEnded { _ in dragStartWidth = nil }
+                    )
+            )
+    }
+}
+
 struct PackView: View {
     @ObservedObject var viewModel: AppViewModel
+    var sidebarWidth: CGFloat
 
     var body: some View {
         if let scene = viewModel.packScene {
@@ -889,7 +933,7 @@ struct PackView: View {
 
                     // Right: stock info + generate button
                     PackInfoView(viewModel: viewModel)
-                        .frame(width: 200)
+                        .frame(width: sidebarWidth)
                 }
             }
         }
