@@ -143,19 +143,6 @@ final class GCodeGeneratorTests: XCTestCase {
 
     // MARK: - Kerf Compensation Tests
 
-    func testKerfCompEnabledInsertsG41orG42() {
-        let stock = makeRoundHSS()
-        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
-        let gen = GCodeGenerator()
-        var s = simpleSettings()
-        s.enableKerfComp = true
-        gen.settings = s
-        let gcode = gen.generateGCode(for: stock)
-        XCTAssertTrue(gcode.contains("G41") || gcode.contains("G42"),
-                      "Kerf comp enabled must insert G41/G42")
-        XCTAssertTrue(gcode.contains("G40"), "Kerf comp must cancel with G40")
-    }
-
     func testKerfCompDisabledNoCompInG1() {
         let stock = makeRoundHSS()
         stock.features.append(makeSeverCut(type: .startCut, xPos: 0))

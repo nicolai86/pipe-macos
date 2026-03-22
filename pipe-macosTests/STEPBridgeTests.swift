@@ -134,7 +134,7 @@ final class STEPBridgeTests: XCTestCase {
 
     func testODPositiveForRoundStock() throws {
         // Check any fixture that happens to be round; skip gracefully if none are.
-        let roundFixtures = ["circ-test-simplified.step", "circ-test.step"]
+        let roundFixtures = ["circ-test-simplified.step", "circ-test-same.step"]
         for name in roundFixtures {
             guard let stock = loadModel(name)?.selectableShapes.first?.stockInfo,
                   stock.profile == .round else { continue }
