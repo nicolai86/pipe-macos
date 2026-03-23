@@ -35,9 +35,6 @@ Feature Detection
   S-curve profiles. Adding a jerk limit (mm/s³ per axis) as a third constraint tier in the profiler would reduce mechanical resonance and vibration on the A-axis rotation at the start and end of cuts, which is the
   axis with the highest inertia.
 
-  6. Adaptive Damped Least Squares instead of fixed λ
-  The Damped Jacobian uses a fixed singularityDampingFactor. Adaptive DLS (ADLS) sets λ dynamically as a function of the manipulability measure of the current Jacobian configuration — it damps aggressively only
-  when the axis is genuinely near a singularity and is essentially transparent everywhere else. This would give better torch tilt accuracy on flat HSS faces while still protecting the corners.
 
   7. G93 Inverse Time Mode as an alternative to G94 spoofing
   The 4D spoofed G94 feedrate is a clever workaround for SimCNC's limitation, but it is mathematically fragile when the A-axis displacement is small relative to the XYZ displacement (the denominator dMachine

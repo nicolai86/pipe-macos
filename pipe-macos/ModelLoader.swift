@@ -59,6 +59,9 @@ class StockInfo: Codable {
     var uAxis: SIMD3<Float>
     var origin: SIMD3<Float>
     var features: [SurfaceFeature] = []
+    /// Face-to-face distance in the uAxis direction (= vertical extent toward torch after roll alignment).
+    /// Nil for round stock. For HSS-Rect/Square: vertDim = uAxisDimension, horizDim = (odX+odY) - uAxisDimension.
+    var uAxisDimension: CGFloat?
 
     init(profile: StockProfile, od: CGFloat? = nil, odX: CGFloat? = nil, odY: CGFloat? = nil, length: CGFloat, axis: SIMD3<Float>, uAxis: SIMD3<Float>, origin: SIMD3<Float>) {
         self.profile = profile; self.od = od; self.odX = odX; self.odY = odY; self.length = length; self.axis = axis; self.uAxis = uAxis; self.origin = origin
@@ -345,6 +348,7 @@ class ModelLoader {
             uAxis: uAxis,
             origin: trueCenter
         )
+        if isRectangular { stockInfo.uAxisDimension = CGFloat(trueWidth) }
 
         extractFeaturesFromTopology(
             facesData: facesData, renderVerts: renderVerts, tubeAxis: tubeAxis, uAxis: uAxis, vAxis: vAxis,

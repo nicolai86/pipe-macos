@@ -1176,6 +1176,107 @@ struct PackSceneView: NSViewRepresentable {
     }
 }
 
+// MARK: - Stock Profile Orientation View
+
+/// Shows a cross-section of HSS-Rect/Square stock, indicating which face should face UP
+/// toward the torch. The `uAxis` face is always at the top after roll-offset alignment.
+struct StockProfileView: View {
+    let stockInfo: StockInfo
+
+    /// Face-to-face distance in the uAxis (vertical / toward torch) direction.
+    private var uDim: CGFloat {
+        stockInfo.uAxisDimension ?? (stockInfo.odY ?? stockInfo.od ?? 50)
+    }
+
+    /// Face-to-face distance in the vAxis (horizontal) direction.
+    private var vDim: CGFloat {
+        let x = stockInfo.odX ?? stockInfo.od ?? 50
+        let y = stockInfo.odY ?? stockInfo.od ?? 50
+        return (x + y) - uDim
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Cutting Orientation")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundColor(.secondary)
+
+            HStack(alignment: .center, spacing: 8) {
+                profileCanvas
+                    .frame(width: 72, height: 72)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.caption2)
+                            .foregroundColor(.yellow)
+                        Text("torch side")
+                            .font(.caption2)
+                            .foregroundColor(.yellow)
+                    }
+                    Text(String(format: "W  %.0f mm", vDim))
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Text(String(format: "H  %.0f mm", uDim))
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+        }
+    }
+
+    private var profileCanvas: some View {
+        Canvas { ctx, size in
+            let padX: CGFloat = 4
+            let padTop: CGFloat = 16  // space for up-arrow
+            let padBot: CGFloat = 4
+
+            let availW = size.width - padX * 2
+            let availH = size.height - padTop - padBot
+
+            let scale = min(availW / vDim, availH / uDim)
+            let rW = vDim * scale
+            let rH = uDim * scale
+            let rX = (size.width - rW) / 2
+            let rY = padTop + (availH - rH) / 2
+
+            let cornerR = min(rW, rH) * 0.1
+            let rect = CGRect(x: rX, y: rY, width: rW, height: rH)
+
+            // Fill
+            ctx.fill(Path(roundedRect: rect, cornerRadius: cornerR),
+                     with: .color(Color(white: 0.22)))
+
+            // Outline
+            ctx.stroke(Path(roundedRect: rect, cornerRadius: cornerR),
+                       with: .color(Color(white: 0.45)), lineWidth: 1)
+
+            // Yellow highlight on top face (uAxis / torch face)
+            let topEdge = Path { p in
+                p.move(to: CGPoint(x: rX + cornerR, y: rY))
+                p.addLine(to: CGPoint(x: rX + rW - cornerR, y: rY))
+            }
+            ctx.stroke(topEdge, with: .color(.yellow), lineWidth: 2.5)
+
+            // Arrow pointing up from the top face centre
+            let ax = size.width / 2
+            let arrowBase = CGPoint(x: ax, y: rY - 3)
+            let arrowTip  = CGPoint(x: ax, y: 5)
+            var arrow = Path()
+            arrow.move(to: arrowBase)
+            arrow.addLine(to: arrowTip)
+            arrow.move(to: arrowTip)
+            arrow.addLine(to: CGPoint(x: ax - 4, y: arrowTip.y + 6))
+            arrow.move(to: arrowTip)
+            arrow.addLine(to: CGPoint(x: ax + 4, y: arrowTip.y + 6))
+            ctx.stroke(arrow, with: .color(.yellow), lineWidth: 1.5)
+        }
+    }
+}
+
 struct PackInfoView: View {
     @ObservedObject var viewModel: AppViewModel
 
@@ -1208,6 +1309,11 @@ struct PackInfoView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 5) {
+                if let stockInfo = sortedShapes.first?.stockInfo,
+                   stockInfo.profile == .rectangular || stockInfo.profile == .square {
+                    StockProfileView(stockInfo: stockInfo)
+                }
+
                 Text("Stock Required")
                     .font(.caption)
                     .fontWeight(.semibold)
