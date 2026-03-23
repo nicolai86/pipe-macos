@@ -1,10 +1,20 @@
 import XCTest
+import Foundation
 import simd
 @testable import pipe_macos
 
 final class GCodeGeneratorTests: XCTestCase {
 
     // MARK: - Stock Factories
+
+    private func alignAxisToX(_ axis: SIMD3<Float>) -> simd_quatf {
+        let target = SIMD3<Float>(1, 0, 0)
+        let a = simd_normalize(axis)
+        let d = dot(a, target)
+        if d > 0.9999 { return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) }
+        if d < -0.9999 { return simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 1, 0)) }
+        return simd_quatf(angle: acos(d), axis: simd_normalize(cross(a, target)))
+    }
 
     private func makeSquareHSS(length: CGFloat = 500.0) -> StockInfo {
         StockInfo(
@@ -72,10 +82,12 @@ final class GCodeGeneratorTests: XCTestCase {
     /// Deterministic settings with thermal hedging and SimCNC disabled.
     private func simpleSettings() -> GCodeSettings {
         var s = GCodeSettings()
-        s.enableThermalHedging = false
-        s.useSimCNC = false
+        s.enableThermalHedging = true
+        s.thermalHedgingWeightA = 1.0
+        s.thermalHedgingWeightX = 1.0
+        s.useSimCNC = true
         s.enableDynamicTHC = false
-        s.enableDynamicSafeZ = false
+        s.enableDynamicSafeZ = true
         s.enableKerfComp = true
         return s
     }
@@ -512,7 +524,7 @@ final class GCodeGeneratorTests: XCTestCase {
         s.enableDynamicTHC = true
         gen.settings = s
         let gcode = gen.generateGCode(for: stock)
-        XCTAssertTrue(gcode.contains("M221") || gcode.contains("M220"),
+        XCTAssertTrue(gcode.contains("#4061"),
                       "THC control codes must appear when enableDynamicTHC = true")
     }
 
@@ -524,7 +536,114 @@ final class GCodeGeneratorTests: XCTestCase {
         s.enableDynamicTHC = false
         gen.settings = s
         let gcode = gen.generateGCode(for: stock)
-        XCTAssertFalse(gcode.contains("M221") || gcode.contains("M220"),
+        XCTAssertFalse(gcode.contains("4061"),
                        "THC control codes must be absent when enableDynamicTHC = false")
+    }
+
+    // MARK: - Integration Tests
+    
+    private var examplesURL: URL {
+        URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()            // pipe-macosTests/
+            .deletingLastPathComponent()            // project root
+            .appendingPathComponent("pipe-macos/examples")
+    }
+
+    private func fixtureURL(_ name: String) -> URL {
+        examplesURL.appendingPathComponent(name)
+    }
+
+    private func loadModel(_ name: String) -> Model3D? {
+        let url = fixtureURL(name)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return ModelLoader.loadSTEP(url: url)
+    }
+
+    func testRectComplexFixtureRotationOnA() throws {
+        let url = fixtureURL("circ-test-rect-complex.step")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("circ-test-rect-complex.step not found in examples/")
+        }
+        guard let model = loadModel("circ-test-rect-complex.step"),
+              let stock = model.selectableShapes.first?.stockInfo else {
+            XCTFail("Failed to load model or extract stock info")
+            return
+        }
+        
+        let gen = GCodeGenerator()
+        gen.settings = simpleSettings()
+        
+        let q1 = alignAxisToX(stock.axis)
+        var rollDeg: CGFloat = 0
+        if stock.profile != .round {
+            let rotatedU = q1.act(simd_normalize(stock.uAxis))
+            let rollAngle = atan2(rotatedU.z, rotatedU.y)
+            rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
+        }
+        let gcode = gen.generateGCode(for: stock, rollOffset: rollDeg)
+        let lines = gcode.components(separatedBy: CharacterSet.newlines)
+        
+        var currentFeature: String? = nil
+        var minA: CGFloat = .greatestFiniteMagnitude
+        var maxA: CGFloat = -.greatestFiniteMagnitude
+        var featuresChecked = 0
+        var insideCut = false
+        var currentFeatureLines: [String] = []
+        
+        for line in lines {
+            let t = line.trimmingCharacters(in: CharacterSet.whitespaces)
+            if t.hasPrefix("; ---") {
+                if let feature = currentFeature, feature != "Startcut" && feature != "Endcut" {
+                    let diff = maxA - minA
+                    if diff >= 1.0 {
+                        print("Violating GCode section for feature \(feature):\n\(currentFeatureLines.joined(separator: "\n"))\n--- End of violating section ---")
+                    }
+                    XCTAssertLessThan(diff, 1.0, "Feature \(feature) should have < 1 degree of A-axis rotation, got \(diff)° (min: \(minA), max: \(maxA))")
+                    featuresChecked += 1
+                }
+                
+                let parts = t.components(separatedBy: CharacterSet.whitespaces)
+                if parts.count >= 3 {
+                    currentFeature = parts[2] // e.g. "; --- Hole X=... A=... ---"
+                } else {
+                    currentFeature = "Unknown"
+                }
+                minA = .greatestFiniteMagnitude
+                maxA = -.greatestFiniteMagnitude
+                insideCut = false
+                currentFeatureLines = []
+            }
+            
+            if currentFeature != nil {
+                currentFeatureLines.append(line)
+            }
+            
+            if t.hasPrefix("M3") {
+                insideCut = true
+            } else if t.hasPrefix("M5") {
+                insideCut = false
+            } else if insideCut && (t.hasPrefix("G0 ") || t.hasPrefix("G1 ")) {
+                let tokens = t.components(separatedBy: CharacterSet.whitespaces)
+                for token in tokens {
+                    if token.hasPrefix("A") {
+                        if let aVal = Double(token.dropFirst()) {
+                            minA = min(minA, CGFloat(aVal))
+                            maxA = max(maxA, CGFloat(aVal))
+                        }
+                    }
+                }
+            }
+        }
+        
+        if let feature = currentFeature, feature != "Startcut" && feature != "Endcut" {
+            let diff = maxA - minA
+            if diff >= 1.0 {
+                print("Violating GCode section for feature \(feature):\n\(currentFeatureLines.joined(separator: "\n"))\n--- End of violating section ---")
+            }
+            XCTAssertLessThan(diff, 1.0, "Feature \(feature) should have < 1 degree of A-axis rotation, got \(diff)° (min: \(minA), max: \(maxA))")
+            featuresChecked += 1
+        }
+        
+        XCTAssertEqual(featuresChecked, 4, "Expected to check 4 features on flat faces, but checked \(featuresChecked)")
     }
 }
