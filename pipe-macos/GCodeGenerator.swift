@@ -271,15 +271,14 @@ struct GCodeSettings {
     /// F as the XYZ linear feed rate.
     var useSimCNC: Bool = true
 
-    /// When `true`, injects M220 (THC OFF / corner lock) and M221 (THC ON) codes
+    /// When `true`, injects (THC OFF / corner lock) and  (THC ON) codes
     /// at transitions between corner and flat regions of rectangular HSS.
     ///
     /// Prevents the Torch Height Controller from chasing the rapidly changing arc
     /// voltage through HSS corner transitions, which would cause the torch to
     /// incorrectly plunge or retract.  Has no effect on round tube (no corners).
     ///
-    /// Requires a THC that supports M220/M221 (Mach4 with THC plugin, SimCNC THC,
-    /// Mesa THCAD-compatible setups).  Disable for THC systems that use a different
+    /// Requires SimCNC/ GCode parameter #4061.  Disable for THC systems that use a different
     /// corner-lock protocol.
     var enableDynamicTHC: Bool = true
 
@@ -1172,10 +1171,11 @@ class GCodeGenerator {
         var currentTHCState = true
         if settings.enableDynamicTHC {
             if pierceMp.isCorner {
-                lines.append("M220                  ; THC OFF (Corner Lock)")
+                lines.append("#50 = #4061                  ; THC OFF (Corner Lock)")
+                lines.append("#4061 = 1                  ; THC OFF (Corner Lock)")
                 currentTHCState = false
             } else {
-                lines.append("M221                  ; THC ON (Flat Segment)")
+                lines.append("#4061 = #50                  ; THC ON (Flat Segment)")
             }
         }
 
@@ -1187,10 +1187,11 @@ class GCodeGenerator {
             // Apply Dynamic THC Control
             if settings.enableDynamicTHC {
                 if curr.isCorner && currentTHCState {
-                    lines.append("M220                  ; THC OFF (Corner Lock)")
+                    lines.append("#50 = #4061                  ; THC OFF (Corner Lock)")
+                    lines.append("#4061 = 1                  ; THC OFF (Corner Lock)")
                     currentTHCState = false
                 } else if !curr.isCorner && !currentTHCState {
-                    lines.append("M221                  ; THC ON (Flat Segment)")
+                    lines.append("#4061 = #50                  ; THC ON (Flat Segment)")
                     currentTHCState = true
                 }
             }
