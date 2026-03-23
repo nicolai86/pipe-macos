@@ -733,8 +733,12 @@ class AppViewModel: ObservableObject {
         simTorchHeight  = maxCross * 0.3  // scale torch size with stock
 
         // Compute angular offset so G-code A=0 maps to uAxis facing world +Y (toward torch).
-        // Uses q1 only (axis-alignment, no roll correction) — unified for both round and HSS.
+        // For round stock only q1 is baked into the geometry, so we need simA0Offset to
+        // bring uAxis to +Y at gcodeA=0.
+        // For HSS-Rect/Square, addPieceNode bakes q2*q1 which already places uAxis at +Y,
+        // so simA0Offset must be 0 — otherwise applySimState would double-rotate.
         if let refStock = expanded.first?.shape.stockInfo,
+           refStock.profile == .round,
            simd_length(refStock.uAxis) > 0.001 {
             let q1_ref = alignAxisToX(refStock.axis)
             let rotatedU = q1_ref.act(normalize(refStock.uAxis))
