@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import SceneKit
 import simd
+import AppKit
 
 // MARK: - UTType Extensions
 extension UTType {
@@ -21,6 +22,7 @@ struct ContentView: View {
     @State private var showingSaveDialog = false
     @State private var showingSettings = false
     @AppStorage("sidebarWidth") private var sidebarWidth: Double = 300
+    @AppStorage("stockTubeLength") private var stockTubeLength: Double = 6000
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,6 +55,10 @@ struct ContentView: View {
         .background(Color(NSColor.windowBackgroundColor))
         .onAppear {
             setupNotifications()
+            viewModel.stockTubeLength = stockTubeLength
+        }
+        .onChange(of: viewModel.stockTubeLength) { newVal in
+            stockTubeLength = newVal
         }
         .fileImporter(
             isPresented: $showingFilePicker,
@@ -75,6 +81,9 @@ struct ContentView: View {
             if viewModel.generatedGCode != nil {
                 showingSaveDialog = true
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveGCodePacks)) { _ in
+            viewModel.saveGCodePacksAsZip()
         }
         .fileExporter(
             isPresented: $showingSaveDialog,
@@ -277,11 +286,16 @@ class AppViewModel: ObservableObject {
     @Published var selectedShape: SelectedShape?
     @Published var matchingShapes: [SelectedShape] = []
     @Published var generatedGCode: String?
+    @Published var generatedGCodePacks: [String] = []
     @Published var viewMode: ViewMode = .solid
     @Published var packScene: SCNScene?
     @Published var shapeOverrides: [UUID: ShapeOverride] = [:]
     @Published var simRunning = false
     @Published var simSpeedMultiplier: Float = 10.0  // 1× = real time, 10× = 10 times faster
+    /// Length of a full stock tube in mm. Packs exceeding this are split.
+    @Published var stockTubeLength: Double = 6000.0
+    /// Number of packs in the current layout, updated by buildPackScene (source of truth).
+    @Published var currentPackCount: Int = 1
     private var simTimer: Timer?
     private var simTotalLength: Float = 0
     private var simStockRadius: Float = 30.0
@@ -399,46 +413,63 @@ class AppViewModel: ObservableObject {
         NotificationCenter.default.post(name: .openModel, object: nil)
     }
     
-    // Update: Generates G-code for the whole pack
+    // Generates G-code for the whole pack, splitting across tubes when needed.
     func generatePackGCode(triggerSave: Bool = true) {
-        guard let selected = selectedShape else { return }
-        let allShapes = [selected] + matchingShapes
-        let activeSettings = CutPresetManager.shared.currentGCodeSettings()
-        // Ascending: same order as buildPackScene — shortest left, longest right (first cut)
-        let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) < ($1.stockInfo?.length ?? 0) }
-
+        guard selectedShape != nil else { return }
         let gap: CGFloat = 10.0
-        var packX: CGFloat = 0
-        var entries: [PackEntry] = []
-        for shape in sorted {
-            let ov = shapeOverride(for: shape)
-            guard ov.enabled, let stock = shape.stockInfo else { continue }
-            let len = stock.length
+        let generator = GCodeGenerator()
+        generator.settings = CutPresetManager.shared.currentGCodeSettings()
 
-            // Calculate the roll offset for each piece in the pack
-            let q1 = alignAxisToX(stock.axis)
-            var rollDeg: CGFloat = 0
-            if stock.profile != .round {
-                let rotatedU = q1.act(normalize(stock.uAxis))
-                let rollAngle = atan2(rotatedU.z, rotatedU.y)
-                rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
-            }
+        let expanded = computeExpandedPieces()
+        let groups = splitIntoPacks(expanded, gap: gap)
 
-            let qty = max(1, ov.quantity)
-            for _ in 0..<qty {
-                entries.append(PackEntry(shape: shape, packStartX: packX, rollOffset: rollDeg))
-                packX += len + gap
+        // One G-code string per pack.
+        generatedGCodePacks = groups.map { group in
+            generator.generatePackGCode(entries: makePackEntries(from: group, gap: gap))
+        }
+        generatedGCode = generatedGCodePacks.first
+
+        // Simulation uses all pieces laid out in one continuous sequence (visual approximation).
+        let simEntries = makePackEntries(from: expanded, gap: gap)
+        let simCode = generator.generatePackGCode(entries: simEntries)
+        simSegments = buildSimSegments(from: simCode)
+        resetSim()
+
+        if triggerSave {
+            if generatedGCodePacks.count > 1 {
+                NotificationCenter.default.post(name: .saveGCodePacks, object: nil)
+            } else {
+                NotificationCenter.default.post(name: .saveGCode, object: nil)
             }
         }
+    }
 
-        let generator = GCodeGenerator()
-        generator.settings = activeSettings
-        generatedGCode = generator.generatePackGCode(entries: entries)
-        // Build simulation segments from the G-code so Start replays the actual toolpath
-        simSegments = buildSimSegments(from: generatedGCode ?? "")
-        resetSim()
-        if triggerSave {
-            NotificationCenter.default.post(name: .saveGCode, object: nil)
+    /// Saves all generated packs as a ZIP archive chosen via NSSavePanel.
+    func saveGCodePacksAsZip() {
+        guard generatedGCodePacks.count > 1 else { return }
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gcpacks-\(UUID().uuidString)")
+        guard (try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)) != nil else { return }
+        for (i, gcode) in generatedGCodePacks.enumerated() {
+            try? gcode.write(to: tmpDir.appendingPathComponent("pack_\(i + 1).nc"),
+                             atomically: true, encoding: .utf8)
+        }
+        let panel = NSSavePanel()
+        if let zipType = UTType(filenameExtension: "zip") { panel.allowedContentTypes = [zipType] }
+        panel.nameFieldStringValue = "gcode_packs.zip"
+        panel.title = "Save G-code packs as ZIP"
+        panel.begin { [weak self] response in
+            guard response == .OK, let destURL = panel.url, let self else {
+                try? FileManager.default.removeItem(at: tmpDir); return
+            }
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+            proc.arguments = ["-j", destURL.path]
+                + (0..<self.generatedGCodePacks.count).map { i in
+                    tmpDir.appendingPathComponent("pack_\(i + 1).nc").path
+                }
+            try? proc.run(); proc.waitUntilExit()
+            try? FileManager.default.removeItem(at: tmpDir)
         }
     }
 
@@ -467,6 +498,83 @@ class AppViewModel: ObservableObject {
     
     // MARK: - Pack View
 
+    /// A single expanded piece (after applying quantity) ready for bin-packing.
+    private struct ExpandedPiece {
+        let shape: SelectedShape
+        let rollOffset: CGFloat
+        var length: CGFloat { shape.stockInfo?.length ?? 0 }
+    }
+
+    /// Expands all enabled shapes with their quantities into a flat list,
+    /// sorted by ascending length (shortest first).
+    private func computeExpandedPieces() -> [ExpandedPiece] {
+        guard let selected = selectedShape else { return [] }
+        let allShapes = [selected] + matchingShapes
+        let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) < ($1.stockInfo?.length ?? 0) }
+        var pieces: [ExpandedPiece] = []
+        for shape in sorted {
+            let ov = shapeOverride(for: shape)
+            guard ov.enabled, let stock = shape.stockInfo else { continue }
+            let q1 = alignAxisToX(stock.axis)
+            var rollDeg: CGFloat = 0
+            if stock.profile != .round {
+                let rotatedU = q1.act(normalize(stock.uAxis))
+                rollDeg = CGFloat(-atan2(rotatedU.z, rotatedU.y) * 180.0 / .pi)
+            }
+            for _ in 0..<max(1, ov.quantity) {
+                pieces.append(ExpandedPiece(shape: shape, rollOffset: rollDeg))
+            }
+        }
+        return pieces
+    }
+
+    /// Groups pieces into packs where each pack fits within stockTubeLength.
+    /// Uses First Fit Decreasing to minimise waste.
+    /// Each returned sub-array is sorted ascending by length (shortest-first = leftmost).
+    private func splitIntoPacks(_ pieces: [ExpandedPiece], gap: CGFloat) -> [[ExpandedPiece]] {
+        let limit = CGFloat(stockTubeLength)
+        // If no meaningful limit, one big pack.
+        guard limit > 0 else { return [pieces] }
+
+        // FFD: place longest pieces first.
+        let sorted = pieces.sorted { $0.length > $1.length }
+
+        var packs: [[ExpandedPiece]] = []
+        var used: [CGFloat] = []
+
+        for piece in sorted {
+            var placed = false
+            for i in 0..<packs.count {
+                let addLen = used[i] == 0 ? piece.length : used[i] + gap + piece.length
+                if addLen <= limit {
+                    packs[i].append(piece)
+                    used[i] = addLen
+                    placed = true
+                    break
+                }
+            }
+            if !placed {
+                // Start a new pack (even if piece itself > limit — never drop a piece).
+                packs.append([piece])
+                used.append(piece.length)
+            }
+        }
+
+        // Re-sort each pack ascending by length for the cutting/scene order.
+        return packs.map { $0.sorted { $0.length < $1.length } }
+    }
+
+    /// Converts an ordered list of pieces in one pack into PackEntry objects
+    /// with sequential packStartX positions.
+    private func makePackEntries(from pieces: [ExpandedPiece], gap: CGFloat, startX: CGFloat = 0) -> [PackEntry] {
+        var x = startX
+        return pieces.map { piece in
+            let entry = PackEntry(shape: piece.shape, packStartX: x, rollOffset: piece.rollOffset)
+            x += piece.length + gap
+            return entry
+        }
+    }
+
     private func alignAxisToX(_ axis: SIMD3<Float>) -> simd_quatf {
         let target = SIMD3<Float>(1, 0, 0)
         let a = normalize(axis)
@@ -485,14 +593,21 @@ class AppViewModel: ObservableObject {
             packScene = nil
             return
         }
-        let allShapes = [selected] + matchingShapes
-        // Ascending sort: shortest on left, longest on RIGHT (torch side)
-        let sorted = allShapes.sorted { ($0.stockInfo?.length ?? 0) < ($1.stockInfo?.length ?? 0) }
 
         let scene = SCNScene()
         let gap: Float = 10.0
         var packX: Float = 0.0
         var maxCross: Float = 20.0
+
+        // Pre-compute maxCross so dividers are sized correctly.
+        let allShapes = [selected] + matchingShapes
+        for shape in allShapes {
+            if let s = shape.stockInfo {
+                let cx = Float(s.odX ?? s.od ?? 0)
+                let cy = Float(s.odY ?? s.od ?? 0)
+                maxCross = max(maxCross, max(cx, cy))
+            }
+        }
 
         let ambientNode = SCNNode()
         let ambient = SCNLight()
@@ -513,55 +628,67 @@ class AppViewModel: ObservableObject {
         stockGroup.name = "stockGroup"
         scene.rootNode.addChildNode(stockGroup)
 
+        // Split pieces into packs and render each pack, separated by a visual divider.
+        let expanded = computeExpandedPieces()
+        let packGroups = splitIntoPacks(expanded, gap: CGFloat(gap))
+        currentPackCount = packGroups.count
+        let packDividerGap: Float = 60.0   // extra space between packs in scene
         var nodeIdx = 0
-        for shape in sorted {
-            let ov = shapeOverride(for: shape)
-            guard ov.enabled, let stock = shape.stockInfo,
-                  let geometry = shape.node?.geometry else { continue }
 
+        /// Renders one piece at the current packX and advances packX.
+        func addPieceNode(_ piece: ExpandedPiece) {
+            guard let stock = piece.shape.stockInfo,
+                  let geometry = piece.shape.node?.geometry else { return }
             let length = Float(stock.length)
             let q1 = alignAxisToX(stock.axis)
             let q: simd_quatf
             if stock.profile != .round {
                 let rotatedU = q1.act(normalize(stock.uAxis))
-                let rollAngle = atan2(rotatedU.z, rotatedU.y)
-                let q2 = simd_quatf(angle: -rollAngle, axis: SIMD3<Float>(1, 0, 0))
+                let q2 = simd_quatf(angle: -atan2(rotatedU.z, rotatedU.y), axis: SIMD3<Float>(1, 0, 0))
                 q = q2 * q1
             } else {
                 q = q1
             }
-
             let origVerts = extractVertices(from: geometry)
             let faces = extractFaces(from: geometry)
-            let cross = max(Float(stock.odX ?? stock.od ?? 0), Float(stock.odY ?? stock.od ?? 0))
-            maxCross = max(maxCross, cross)
-            let isSelected = (shape == selected)
+            var newVerts: [SCNVector3] = []
+            for v in origVerts {
+                let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+                let centered = p - stock.origin
+                let rotated = q.act(centered)
+                let placed = rotated + SIMD3<Float>(packX + length / 2.0, 0, 0)
+                newVerts.append(SCNVector3(CGFloat(placed.x), CGFloat(placed.y), CGFloat(placed.z)))
+            }
+            let packGeometry = SCNGeometry(vertices: newVerts, faces: faces)
+            let mat = SCNMaterial()
+            mat.isDoubleSided = true
+            mat.diffuse.contents = (piece.shape == selected)
+                ? NSColor.orange
+                : NSColor(red: 0.0, green: 0.7, blue: 1.0, alpha: 1.0)
+            packGeometry.materials = [mat]
+            let node = SCNNode(geometry: packGeometry)
+            node.name = "pack_\(nodeIdx)"; nodeIdx += 1
+            stockGroup.addChildNode(node)
+            packX += length + gap
+        }
 
-            let qty = max(1, ov.quantity)
-            for _ in 0..<qty {
-                var newVerts: [SCNVector3] = []
-                for v in origVerts {
-                    let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
-                    let centered = p - stock.origin
-                    let rotated = q.act(centered)
-                    let placed = rotated + SIMD3<Float>(packX + length / 2.0, 0, 0)
-                    newVerts.append(SCNVector3(CGFloat(placed.x), CGFloat(placed.y), CGFloat(placed.z)))
-                }
-
-                let packGeometry = SCNGeometry(vertices: newVerts, faces: faces)
-                let mat = SCNMaterial()
-                mat.isDoubleSided = true
-                mat.diffuse.contents = isSelected
-                    ? NSColor.orange
-                    : NSColor(red: 0.0, green: 0.7, blue: 1.0, alpha: 1.0)
-                packGeometry.materials = [mat]
-
-                let node = SCNNode(geometry: packGeometry)
-                node.name = "pack_\(nodeIdx)"
-                nodeIdx += 1
-                stockGroup.addChildNode(node)
-
-                packX += length + gap
+        for (groupIdx, group) in packGroups.enumerated() {
+            // Yellow divider panel between packs
+            if groupIdx > 0 {
+                let divH = CGFloat(maxCross * 2.8)
+                let divBox = SCNBox(width: 4, height: divH, length: divH, chamferRadius: 0)
+                let divMat = SCNMaterial()
+                divMat.diffuse.contents = NSColor(red: 1.0, green: 0.78, blue: 0.0, alpha: 0.85)
+                divMat.isDoubleSided = true
+                divBox.materials = [divMat]
+                let divNode = SCNNode(geometry: divBox)
+                divNode.name = "packDiv_\(groupIdx)"
+                divNode.position = SCNVector3(CGFloat(packX + packDividerGap / 2 - gap / 2), 0, 0)
+                stockGroup.addChildNode(divNode)
+                packX += packDividerGap
+            }
+            for piece in group {
+                addPieceNode(piece)
             }
         }
 
@@ -572,7 +699,7 @@ class AppViewModel: ObservableObject {
 
         // Compute angular offset so G-code A=0 maps to uAxis facing world +Y (toward torch).
         // Uses q1 only (axis-alignment, no roll correction) — unified for both round and HSS.
-        if let refStock = sorted.first?.stockInfo,
+        if let refStock = expanded.first?.shape.stockInfo,
            simd_length(refStock.uAxis) > 0.001 {
             let q1_ref = alignAxisToX(refStock.axis)
             let rotatedU = q1_ref.act(normalize(refStock.uAxis))
@@ -964,6 +1091,8 @@ struct PackInfoView: View {
 
     private static let packGap: CGFloat = 10.0  // mm between pieces
 
+    @State private var stockLengthText: String = ""
+
     private var sortedShapes: [SelectedShape] {
         guard let s = viewModel.selectedShape else { return [] }
         return ([s] + viewModel.matchingShapes)
@@ -984,6 +1113,8 @@ struct PackInfoView: View {
         return total + gaps
     }
 
+    private var packCount: Int { viewModel.currentPackCount }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 5) {
@@ -991,6 +1122,28 @@ struct PackInfoView: View {
                     .font(.caption)
                     .fontWeight(.semibold)
                     .foregroundColor(.secondary)
+
+                // Stock tube length input
+                HStack(spacing: 4) {
+                    Text("Tube length:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("mm", text: $stockLengthText)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(width: 70)
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .onAppear {
+                            stockLengthText = String(format: "%.0f", viewModel.stockTubeLength)
+                        }
+                        .onChange(of: viewModel.stockTubeLength) { v in
+                            stockLengthText = String(format: "%.0f", v)
+                        }
+                        .onSubmit { commitStockLength() }
+                    Text("mm")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
 
                 Divider()
 
@@ -1054,9 +1207,22 @@ struct PackInfoView: View {
                         .fontWeight(.semibold)
                 }
 
+                // Pack count warning
+                if packCount > 1 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "shippingbox.fill")
+                            .foregroundColor(.yellow)
+                            .font(.caption)
+                        Text("\(packCount) tubes required")
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                    }
+                    .padding(.top, 2)
+                }
+
                 Divider()
 
-                Button("Generate GCode") {
+                Button(packCount > 1 ? "Generate GCode (\(packCount) files → ZIP)" : "Generate GCode") {
                     viewModel.generatePackGCode()
                 }
                 .buttonStyle(.borderedProminent)
@@ -1064,6 +1230,16 @@ struct PackInfoView: View {
                 .frame(maxWidth: .infinity)
             }
             .padding(8)
+        }
+    }
+
+    private func commitStockLength() {
+        if let v = Double(stockLengthText.trimmingCharacters(in: .whitespaces)), v > 0 {
+            viewModel.stockTubeLength = v
+            viewModel.buildPackScene()
+        } else {
+            // Reset to current value on bad input
+            stockLengthText = String(format: "%.0f", viewModel.stockTubeLength)
         }
     }
 }

@@ -31,4 +31,5 @@ struct pipe_macosApp: App {
 extension Notification.Name {
     static let openModel = Notification.Name("openModel")
     static let saveGCode = Notification.Name("saveGCode")
+    static let saveGCodePacks = Notification.Name("saveGCodePacks")
 }
