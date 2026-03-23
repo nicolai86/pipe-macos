@@ -435,6 +435,143 @@ final class STEPBridgeTests: XCTestCase {
                        "Must have exactly 2 cutout/notch/hole features, got \(cutouts.count): \(cutouts.map { $0.rawValue })")
     }
 
+    // MARK: - Simple Rotated Fixture: Shape Count, Profile, Dimensions, Feature Count & Types
+
+    func testSimpleRotatedFixtureShapeCount() throws {
+        _ = try skip(ifMissing: "simple-rotated-test.step")
+        let shapes = loadModel("simple-rotated-test.step")?.selectableShapes ?? []
+        XCTAssertEqual(shapes.count, 2,
+                       "simple-rotated-test.step must contain exactly 2 selectable shapes, got \(shapes.count)")
+    }
+
+    func testSimpleRotatedFixtureProfileIsSquare() throws {
+        _ = try skip(ifMissing: "simple-rotated-test.step")
+        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
+        for (i, shape) in shapes.enumerated() {
+            guard let stock = shape.stockInfo else {
+                XCTFail("Shape \(i) has no stockInfo"); continue
+            }
+            XCTAssertTrue(stock.profile == .rectangular || stock.profile == .square,
+                          "Shape \(i) must be HSS-Rect or HSS-Square, got \(stock.profile.rawValue)")
+        }
+    }
+
+    func testSimpleRotatedFixtureDimensions() throws {
+        _ = try skip(ifMissing: "simple-rotated-test.step")
+        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
+        let tolerance: CGFloat = 1.0   // ±1 mm to allow for measurement/rounding
+        let expected: CGFloat = 25.4
+        for (i, shape) in shapes.enumerated() {
+            guard let stock = shape.stockInfo else { continue }
+            let odX = stock.odX ?? stock.od ?? 0
+            let odY = stock.odY ?? stock.od ?? 0
+            XCTAssertEqual(Double(odX), Double(expected), accuracy: Double(tolerance),
+                           "Shape \(i) odX should be ~25.4 mm, got \(odX) mm")
+            XCTAssertEqual(Double(odY), Double(expected), accuracy: Double(tolerance),
+                           "Shape \(i) odY should be ~25.4 mm, got \(odY) mm")
+        }
+    }
+
+    func testSimpleRotatedFixtureFeatureCount() throws {
+        _ = try skip(ifMissing: "simple-rotated-test.step")
+        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
+        for (i, shape) in shapes.enumerated() {
+            guard let stock = shape.stockInfo else {
+                XCTFail("Shape \(i) has no stockInfo"); continue
+            }
+            XCTAssertEqual(stock.features.count, 2,
+                           "Shape \(i) must have exactly 2 features, got \(stock.features.count): \(stock.features.map { $0.type.rawValue })")
+        }
+    }
+
+    func testSimpleRotatedFixtureFeatureTypes() throws {
+        _ = try skip(ifMissing: "simple-rotated-test.step")
+        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
+        for (i, shape) in shapes.enumerated() {
+            guard let stock = shape.stockInfo else { continue }
+            let types = Set(stock.features.map { $0.type })
+            XCTAssertTrue(types.contains(.startCut),
+                          "Shape \(i) must have a startCut feature, got: \(types.map { $0.rawValue })")
+            XCTAssertTrue(types.contains(.endCut),
+                          "Shape \(i) must have an endCut feature, got: \(types.map { $0.rawValue })")
+        }
+    }
+
+    // MARK: - Regression Tests: Threshold Bug Fixes
+
+    /// Bug 1 — `extremumTol` was 2.0 mm.
+    /// Inner walls of thin HSS (wall < 2 mm) were incorrectly included in
+    /// `outerWallFaceIDs`, producing phantom feature loops at both tube ends.
+    ///
+    /// `circ-test-simplified.step` is "HSS 1/2×1/2×0.065" (wall = 0.065 in = 1.651 mm).
+    /// With the old value of 2.0 mm: inner wall at (maxD − 1.651) ≥ maxD − 2.0 → included.
+    /// Each phantom inner-bore end loop was classified as an extra sever cut,
+    /// doubling the feature count from 2 → 4 per piece.
+    ///
+    /// Fixed: `extremumTol` = 0.5 mm (5× mesh deflection, below minimum HSS wall ~1.5 mm).
+    func testBug1ExtremumTolThinWalledHSSExactly2Features() throws {
+        _ = try skip(ifMissing: "circ-test-simplified.step")
+        guard let shapes = loadModel("circ-test-simplified.step")?.selectableShapes else { return }
+        for (i, shape) in shapes.enumerated() {
+            guard let stock = shape.stockInfo else {
+                XCTFail("Shape \(i) has no stockInfo"); continue
+            }
+            // With old extremumTol=2.0 mm this would be 4 (phantom inner-bore cuts).
+            XCTAssertEqual(stock.features.count, 2,
+                           "Shape \(i): expected 2 features (start+end sever cuts), got " +
+                           "\(stock.features.count): \(stock.features.map { $0.type.rawValue }). " +
+                           "Count > 2 means inner-wall faces are leaking into the outer hull (extremumTol too large).")
+        }
+    }
+
+    /// Bug 2 — `stitchTolerance` was `max(1.5, tubeLength × 0.01)`.
+    /// On a 385 mm tube that gives 3.85 mm; two separate feature loops whose partial
+    /// endpoints sat 2–3 mm apart at a face boundary were incorrectly merged into one,
+    /// reducing the observed feature count.
+    ///
+    /// This unit test drives `ModelLoader.stitch(_:tolerance:)` directly with two loops
+    /// whose nearest endpoints are 2.5 mm apart — inside the old 3.85 mm budget but
+    /// outside the fixed 2.0 mm budget — and verifies they stay as separate loops.
+    func testBug2StitchToleranceDoesNotMergeDistinctFeatures() {
+        let loop1: [SIMD3<Float>] = [SIMD3(10, 0, 0), SIMD3(10, 5, 0)]
+        // Nearest endpoint is 2.5 mm from loop1's last point.
+        let loop2: [SIMD3<Float>] = [SIMD3(10, 7.5, 0), SIMD3(10, 15, 0)]
+
+        let fixedResult = ModelLoader.stitch([loop1, loop2], tolerance: 2.0)
+        XCTAssertEqual(fixedResult.count, 2,
+                       "With fixed tolerance 2.0 mm, loops 2.5 mm apart must remain separate features")
+
+        // Demonstrate old behaviour (385 mm tube → old formula gives 3.85 mm):
+        let oldResult = ModelLoader.stitch([loop1, loop2], tolerance: 3.85)
+        XCTAssertEqual(oldResult.count, 1,
+                       "With old tolerance 3.85 mm, loops 2.5 mm apart would have been merged (the bug)")
+    }
+
+    /// Bug 3 — `axisTol` was `max(3.0, tubeLength × 0.015)`, minimum 3.0 mm.
+    /// A cutout whose axial loop starts 2.5 mm from a tube end is a genuine mid-tube
+    /// feature; it should be `.cutout`. The old minimum of 3.0 mm made `touchesStart`
+    /// fire, promoting it to `.notch` (wrong).
+    ///
+    /// This unit test drives `ModelLoader.featureType(...)` directly with the boundary
+    /// condition (loopMinX = 2.5 mm) and verifies the classification under both the
+    /// fixed axisTol (2.0 mm) and the old minimum (3.0 mm).
+    func testBug3AxisTolCutoutNearTubeEndIsNotMisclassified() {
+        let tubeLength: Float = 100.0
+
+        let fixedType = ModelLoader.featureType(
+            loopMinX: 2.5, loopMaxX: 10.0,
+            tubeLength: tubeLength, isFullProfile: false, axisTol: 2.0)
+        XCTAssertEqual(fixedType, .cutout,
+                       "With fixed axisTol 2.0 mm, a loop starting at 2.5 mm should be .cutout")
+
+        // Demonstrate old behaviour (old minimum axisTol was 3.0 mm):
+        let oldType = ModelLoader.featureType(
+            loopMinX: 2.5, loopMaxX: 10.0,
+            tubeLength: tubeLength, isFullProfile: false, axisTol: 3.0)
+        XCTAssertEqual(oldType, .notch,
+                       "With old axisTol 3.0 mm, a loop starting at 2.5 mm would have been .notch (the bug)")
+    }
+
     // MARK: - Round-trip: STEP → StockInfo → GCode
 
     func testSTEPToGCodeRoundTrip() throws {

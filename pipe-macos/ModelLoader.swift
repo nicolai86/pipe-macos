@@ -241,19 +241,41 @@ class ModelLoader {
             }
         }
 
-        // --- Step 4: Refine with cylinder axis for round tubes ---
-        var maxCylVertices = 0
-        var maxCylRadius: Float = 0
+        // --- Step 4: Refine tube axis; measure cylinder angular coverage ---
+        // Round tubes have one dominant cylinder subtending ~360° around the tube axis.
+        // Rectangular-tube corner fillets each subtend only ~90°.  We measure the
+        // angular span of each cylinder's tessellation vertices in the cross-section
+        // plane via the "largest-gap" method (span = 2π − maxGap) so the result is
+        // exact and model-independent — no hardcoded radius or vertex-count limits.
+        var maxCylAngularSpan: Float = 0
         for f in facesData {
             guard let type = f["surface_type"] as? String, type == "CYLINDER",
                   let cd = f["cylinder"] as? [String: Any] else { continue }
             let axis = normalize(SIMD3<Float>(getFloat(cd, "axisX"), getFloat(cd, "axisY"), getFloat(cd, "axisZ")))
-            let vCount = (f["vertices"] as? [[String: Any]])?.count ?? 0
-            let r = getFloat(cd, "radius")
-            if abs(dot(axis, tubeAxis)) > 0.9 && vCount > maxCylVertices {
-                maxCylVertices = vCount
-                maxCylRadius = r
-                tubeAxis = axis
+            guard abs(dot(axis, tubeAxis)) > 0.9 else { continue }
+            let verts = f["vertices"] as? [[String: Any]] ?? []
+            guard verts.count >= 3 else { continue }
+
+            // Build an orthonormal basis {u, v} perpendicular to the cylinder axis.
+            let loc = SIMD3<Float>(getFloat(cd, "locationX"), getFloat(cd, "locationY"), getFloat(cd, "locationZ"))
+            let arb: SIMD3<Float> = abs(axis.x) < 0.9 ? SIMD3<Float>(1, 0, 0) : SIMD3<Float>(0, 1, 0)
+            let uVec = normalize(cross(axis, arb))
+            let vVec = normalize(cross(axis, uVec))
+
+            // Project each vertex onto the cross-section plane and compute its angle.
+            let angles: [Float] = verts.map { vtx in
+                let p = SIMD3<Float>(getFloat(vtx, "x"), getFloat(vtx, "y"), getFloat(vtx, "z")) - loc
+                return atan2(dot(p, vVec), dot(p, uVec))
+            }.sorted()
+
+            // Largest gap between consecutive sorted angles (including wrap-around).
+            var maxGap = angles[0] + 2 * .pi - angles[angles.count - 1]
+            for i in 1..<angles.count { maxGap = max(maxGap, angles[i] - angles[i - 1]) }
+            let span = 2 * .pi - maxGap
+
+            if span > maxCylAngularSpan {
+                maxCylAngularSpan = span
+                tubeAxis = dot(axis, tubeAxis) >= 0 ? axis : -axis
             }
         }
         tubeAxis = normalize(tubeAxis)
@@ -298,11 +320,20 @@ class ModelLoader {
         let trueCrossMax = max(trueWidth, trueHeight)
         let trueCrossMin = min(trueWidth, trueHeight)
 
-        let isRound = maxCylRadius > 5.0
+        // A round tube has one cylinder spanning > π (180°) around its axis.
+        // Rectangular corner fillets each span only ~ π/2 (90°), so no single fillet
+        // ever crosses the half-circle threshold regardless of radius or mesh density.
+        let isRound = maxCylAngularSpan > .pi
         let isRectangular = !isRound && !sideWallCandidates.isEmpty
-        let profile: StockProfile = isRectangular
-            ? (abs(trueCrossMax - trueCrossMin) < 2.0 ? .square : .rectangular)
-            : .round
+
+        let profile: StockProfile
+        if isRectangular {
+            profile = abs(trueCrossMax - trueCrossMin) < 2.0 ? .square : .rectangular
+        } else if isRound {
+            profile = .round
+        } else {
+            profile = .round
+        }
 
         let stockInfo = StockInfo(
             profile: profile,
@@ -325,12 +356,71 @@ class ModelLoader {
         return (Mesh3D(vertices: renderVerts, faces: renderFaces, shapeData: shapeData), stockInfo)
     }
 
+    // MARK: - Internal helpers (exposed for unit-testing threshold boundary conditions)
+
+    /// Stitches an unordered collection of partial loops into complete feature loops by
+    /// connecting segments whose endpoints are within `tolerance` mm of each other.
+    ///
+    /// Exposed `internal` so unit tests can drive it directly with synthetic data to verify
+    /// the fixed stitchTolerance (2 mm) does not accidentally merge features that are
+    /// 2–3 mm apart at face boundaries (bug 2 regression).
+    internal static func stitch(_ partialLoops: [[SIMD3<Float>]], tolerance: Float) -> [[SIMD3<Float>]] {
+        var loops: [[SIMD3<Float>]] = []
+        var unvisited = partialLoops
+        while !unvisited.isEmpty {
+            var current = unvisited.removeFirst()
+            var added = true
+            while added {
+                added = false
+                for (i, seg) in unvisited.enumerated() {
+                    let s = current.first!, e = current.last!
+                    let es = seg.first!, ee = seg.last!
+                    if distance(e, es) < tolerance {
+                        current.append(contentsOf: seg.dropFirst()); unvisited.remove(at: i); added = true; break
+                    } else if distance(e, ee) < tolerance {
+                        current.append(contentsOf: seg.reversed().dropFirst()); unvisited.remove(at: i); added = true; break
+                    } else if distance(s, ee) < tolerance {
+                        current.insert(contentsOf: seg.dropLast(), at: 0); unvisited.remove(at: i); added = true; break
+                    } else if distance(s, es) < tolerance {
+                        current.insert(contentsOf: seg.reversed().dropLast(), at: 0); unvisited.remove(at: i); added = true; break
+                    }
+                }
+            }
+            loops.append(current)
+        }
+        return loops
+    }
+
+    /// Classifies a feature loop as startCut, endCut, notch, or cutout given its axial
+    /// extents and whether it is a full-profile (360°) contour.
+    ///
+    /// Exposed `internal` so unit tests can verify that the fixed `axisTol` (2 mm) does
+    /// not promote features starting 2–3 mm from a tube end into `.notch` — which the old
+    /// `max(3.0, tubeLength × 0.015)` formula did (bug 3 regression).
+    internal static func featureType(
+        loopMinX: Float, loopMaxX: Float,
+        tubeLength: Float, isFullProfile: Bool, axisTol: Float
+    ) -> SurfaceFeatureType {
+        let touchesStart = loopMinX <= axisTol
+        let touchesEnd   = loopMaxX >= tubeLength - axisTol
+        if isFullProfile && touchesStart { return .startCut }
+        if isFullProfile && touchesEnd   { return .endCut   }
+        if touchesStart || touchesEnd    { return .notch    }
+        return .cutout
+    }
+
     // MARK: - AAG Feature Extractor (exact OCCT normals + centroid-based hull identification)
     private static func extractFeaturesFromTopology(
         facesData: [[String: Any]], renderVerts: [SCNVector3], tubeAxis: SIMD3<Float>, uAxis: SIMD3<Float>, vAxis: SIMD3<Float>,
         center: SIMD3<Float>, maxPosU: Float, minNegU: Float, maxPosV: Float, minNegV: Float, stockInfo: StockInfo
     ) {
-        let extremumTol: Float = 2.0
+        // A PLANE face is on the outer hull if its projection onto its own normal equals the
+        // global maximum in that direction. OCCT's tessellation evaluates plane vertices
+        // exactly (planes are linear), so they land within floating-point precision of maxD.
+        // 0.5 mm (5× the 0.1 mm mesh deflection) gives ample numerical margin while staying
+        // safely below any realistic wall thickness — ruling out inner faces on all standard
+        // HSS grades (minimum EN 10219 / ASTM A500 wall thickness is 1.5 mm).
+        let extremumTol: Float = 0.5
         var outerWallFaceIDs = Set<Int>()
 
         // Identify outer hull faces using each face's OWN normal direction as reference.
@@ -436,41 +526,21 @@ class ModelLoader {
         // We only stitch the massive, pre-assembled wire segments across face boundaries.
         // =================================================================================
         let tubeLength = Float(stockInfo.length)
-        let stitchTolerance: Float = max(1.5, tubeLength * 0.01)
-
-        var loops: [[SIMD3<Float>]] = []
-        var unvisited = partialLoops
-
-        while !unvisited.isEmpty {
-            var currentLoop = unvisited.removeFirst()
-            var added = true
-            while added {
-                added = false
-                for (i, pLoop) in unvisited.enumerated() {
-                    let loopStart = currentLoop.first!, loopEnd = currentLoop.last!
-                    let edgeStart = pLoop.first!, edgeEnd = pLoop.last!
-                    
-                    if distance(loopEnd, edgeStart) < stitchTolerance {
-                        currentLoop.append(contentsOf: pLoop.dropFirst())
-                        unvisited.remove(at: i); added = true; break
-                    } else if distance(loopEnd, edgeEnd) < stitchTolerance {
-                        currentLoop.append(contentsOf: pLoop.reversed().dropFirst())
-                        unvisited.remove(at: i); added = true; break
-                    } else if distance(loopStart, edgeEnd) < stitchTolerance {
-                        currentLoop.insert(contentsOf: pLoop.dropLast(), at: 0)
-                        unvisited.remove(at: i); added = true; break
-                    } else if distance(loopStart, edgeStart) < stitchTolerance {
-                        currentLoop.insert(contentsOf: pLoop.reversed().dropLast(), at: 0)
-                        unvisited.remove(at: i); added = true; break
-                    }
-                }
-            }
-            loops.append(currentLoop)
-        }
+        // Stitch tolerance is set by tessellation density, not tube length.
+        // STEPBridge uses GCPnts_UniformAbscissa at 1 mm spacing, so the maximum gap
+        // between face-boundary wire endpoints from adjacent faces is ≤ 1 mm per side.
+        // 2 mm (2× the discretization step) closes real face-boundary gaps without
+        // accidentally merging endpoints from distinct nearby features.
+        // stitchTolerance rationale: see ModelLoader.stitch(_:tolerance:) doc-comment.
+        let loops = ModelLoader.stitch(partialLoops, tolerance: 2.0)
 
         // Map 3D loops to 2D (axial position, angular position) and classify as features.
         var featureId = 1
-        let axisTol = max(3.0, tubeLength * 0.015)
+        // Axial endpoint tolerance follows the same logic as stitchTolerance: a sever-cut
+        // loop reaches the tube end within one discretization step (1 mm). 2 mm gives a
+        // 2× safety margin independent of tube length, preventing nearby-end notches from
+        // being misclassified as sever cuts on long tubes.
+        let axisTol: Float = 2.0
 
         for loop3D in loops {
             var pathPoints2D: [ToolpathPoint] = []
@@ -501,14 +571,10 @@ class ModelLoader {
             }
 
             let isFullProfile = abs(accumulatedAngle) > 350.0
-            let touchesStart  = loopMinX <= axisTol
-            let touchesEnd    = loopMaxX >= tubeLength - axisTol
-
-            var type: SurfaceFeatureType
-            if      isFullProfile && touchesStart { type = .startCut }
-            else if isFullProfile && touchesEnd   { type = .endCut   }
-            else if touchesStart || touchesEnd    { type = .notch    }
-            else                                  { type = .cutout   }
+            let type = ModelLoader.featureType(
+                loopMinX: loopMinX, loopMaxX: loopMaxX,
+                tubeLength: tubeLength, isFullProfile: isFullProfile, axisTol: axisTol
+            )
 
             let xCenter = CGFloat(loopMinX + loopMaxX) / 2.0
             let width   = CGFloat(loopMaxX - loopMinX)
