@@ -289,6 +289,219 @@ final class GCodeGeneratorTests: XCTestCase {
                        "G-code must be deterministic for identical input")
     }
 
+    // MARK: - Unit Mode Tests
+
+    /// Returns a generator with simple (deterministic) settings in the given unit mode.
+    private func makeGen(units: GCodeUnit, simCNC: Bool = false) -> GCodeGenerator {
+        let gen = GCodeGenerator()
+        var s = simpleSettings()
+        s.units   = units
+        s.useSimCNC = simCNC
+        gen.settings = s
+        return gen
+    }
+
+    /// Extract all G1 lines from a gcode string.
+    private func g1Lines(_ gcode: String) -> [String] {
+        gcode.components(separatedBy: "\n").filter { $0.hasPrefix("G1 ") }
+    }
+
+    /// Parse the numeric value of the first occurrence of `word` (e.g. "X", "Z", "F") on a line.
+    private func parseWord(_ word: String, from line: String) -> Double? {
+        guard let r = line.range(of: word) else { return nil }
+        let tail = line[r.upperBound...].prefix(while: { $0.isNumber || $0 == "." || $0 == "-" })
+        return Double(tail)
+    }
+
+    // --- Mode word ---
+
+    func testMetricModeEmitsG21() {
+        let stock = makeRoundHSS()
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        let gcode = makeGen(units: .metric).generateGCode(for: stock)
+        XCTAssertTrue(gcode.contains("G21"),  "Metric mode must emit G21")
+        XCTAssertFalse(gcode.contains("G20"), "Metric mode must not emit G20")
+    }
+
+    func testInchModeEmitsG20() {
+        let stock = makeRoundHSS()
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        let gcode = makeGen(units: .inches).generateGCode(for: stock)
+        XCTAssertTrue(gcode.contains("G20"),  "Inch mode must emit G20")
+        XCTAssertFalse(gcode.contains("G21"), "Inch mode must not emit G21")
+    }
+
+    // --- G92 stock-length home position ---
+
+    func testG92StockLengthMetric() {
+        let stock = makeRoundHSS(length: 500)
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        let gcode = makeGen(units: .metric).generateGCode(for: stock)
+        // Expect G92 X500.000
+        XCTAssertTrue(gcode.contains("G92 X500.000"), "G92 X must be 500.000 mm in metric mode")
+    }
+
+    func testG92StockLengthInches() {
+        let stock = makeRoundHSS(length: 508)   // 508 mm = exactly 20 in
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        let gcode = makeGen(units: .inches).generateGCode(for: stock)
+        // 508 / 25.4 = 20.0000
+        XCTAssertTrue(gcode.contains("G92 X20.0000"), "G92 X must be 20.0000 in in inch mode")
+    }
+
+    // --- Safe-height Z rapid ---
+
+    func testSafeHeightZMetric() {
+        let stock = makeRoundHSS()
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        var s = simpleSettings()
+        s.safeHeight = 25.4   // chosen so inch conversion is exact
+        let gen = GCodeGenerator(); gen.settings = s
+        let gcode = gen.generateGCode(for: stock)
+        XCTAssertTrue(gcode.contains("G0 Z25.400"), "Safe-height Z must be 25.400 mm in metric mode")
+    }
+
+    func testSafeHeightZInches() {
+        let stock = makeRoundHSS()
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        var s = simpleSettings(); s.units = .inches; s.safeHeight = 25.4
+        let gen = GCodeGenerator(); gen.settings = s
+        let gcode = gen.generateGCode(for: stock)
+        // 25.4 / 25.4 = 1.0000
+        XCTAssertTrue(gcode.contains("G0 Z1.0000"), "Safe-height Z must be 1.0000 in in inch mode")
+    }
+
+    // --- Header dimensions ---
+
+    func testHeaderDimensionsMetric() {
+        let stock = makeRoundHSS(od: 50.8, length: 500)
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        let gcode = makeGen(units: .metric).generateGCode(for: stock)
+        XCTAssertTrue(gcode.contains("50.800mm"), "OD header must show 50.800mm in metric mode")
+        XCTAssertTrue(gcode.contains("500.000mm"), "Length header must show 500.000mm in metric mode")
+    }
+
+    func testHeaderDimensionsInches() {
+        let stock = makeRoundHSS(od: 50.8, length: 508)  // 50.8mm = 2in, 508mm = 20in
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+        let gcode = makeGen(units: .inches).generateGCode(for: stock)
+        XCTAssertTrue(gcode.contains("2.0000in"), "OD header must show 2.0000in in inch mode")
+        XCTAssertTrue(gcode.contains("20.0000in"), "Length header must show 20.0000in in inch mode")
+    }
+
+    // --- G1 coordinate scaling ---
+
+    func testG1XCoordinatesInchesVsMetric() {
+        // Use 508mm length (exact multiple of 25.4) so conversions are clean.
+        let stock = makeRoundHSS(od: 50.8, length: 508)
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 254))   // midpoint = 10 in
+
+        let gcodeMetric = makeGen(units: .metric).generateGCode(for: stock)
+        let gcodeInches = makeGen(units: .inches).generateGCode(for: stock)
+
+        let xMetric = g1Lines(gcodeMetric).compactMap { parseWord("X", from: $0) }
+        let xInches = g1Lines(gcodeInches).compactMap { parseWord("X", from: $0) }
+
+        XCTAssertEqual(xMetric.count, xInches.count,
+                       "Same number of G1 lines must be produced in both unit modes")
+        XCTAssertFalse(xMetric.isEmpty, "Must have at least one G1 line")
+
+        for (mm, inch) in zip(xMetric, xInches) {
+            XCTAssertEqual(mm / 25.4, inch, accuracy: 0.001,
+                           "G1 X inch value must be X_mm / 25.4; got mm=\(mm) in=\(inch)")
+        }
+    }
+
+    func testG1ZCoordinatesInchesVsMetric() {
+        let stock = makeRoundHSS(od: 50.8, length: 508)
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+
+        let gcodeMetric = makeGen(units: .metric).generateGCode(for: stock)
+        let gcodeInches = makeGen(units: .inches).generateGCode(for: stock)
+
+        let zMetric = g1Lines(gcodeMetric).compactMap { parseWord("Z", from: $0) }
+        let zInches = g1Lines(gcodeInches).compactMap { parseWord("Z", from: $0) }
+
+        XCTAssertEqual(zMetric.count, zInches.count)
+        for (mm, inch) in zip(zMetric, zInches) {
+            XCTAssertEqual(mm / 25.4, inch, accuracy: 0.001,
+                           "G1 Z inch value must be Z_mm / 25.4; got mm=\(mm) in=\(inch)")
+        }
+    }
+
+    // --- A axis must NOT be converted ---
+
+    func testG1AAxisUnchangedInInchMode() {
+        let stock = makeRoundHSS(od: 50.8, length: 508)
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+
+        let gcodeMetric = makeGen(units: .metric).generateGCode(for: stock)
+        let gcodeInches = makeGen(units: .inches).generateGCode(for: stock)
+
+        let aMetric = g1Lines(gcodeMetric).compactMap { parseWord("A", from: $0) }
+        let aInches = g1Lines(gcodeInches).compactMap { parseWord("A", from: $0) }
+
+        XCTAssertEqual(aMetric.count, aInches.count)
+        for (am, ai) in zip(aMetric, aInches) {
+            XCTAssertEqual(am, ai, accuracy: 0.001,
+                           "A-axis degrees must be identical in both unit modes; got metric=\(am) inch=\(ai)")
+        }
+    }
+
+    // --- Feed rates (non-SimCNC) ---
+
+    func testFeedRatesInchesVsMetric() {
+        let stock = makeRoundHSS(od: 50.8, length: 508)
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+
+        let gcodeMetric = makeGen(units: .metric, simCNC: false).generateGCode(for: stock)
+        let gcodeInches = makeGen(units: .inches, simCNC: false).generateGCode(for: stock)
+
+        let fMetric = g1Lines(gcodeMetric).compactMap { parseWord("F", from: $0) }
+        let fInches = g1Lines(gcodeInches).compactMap { parseWord("F", from: $0) }
+
+        XCTAssertFalse(fMetric.isEmpty, "Must have F values in G1 lines")
+        XCTAssertEqual(fMetric.count, fInches.count)
+
+        for (fm, fi) in zip(fMetric, fInches) {
+            XCTAssertEqual(fm / 25.4, fi, accuracy: 0.01,
+                           "Non-SimCNC feed rate in/min must be F_mm / 25.4; got mm=\(fm) in=\(fi)")
+        }
+    }
+
+    // --- Pack mode ---
+
+    func testPackModeEmitsCorrectUnitWord() {
+        let stock = makeRoundHSS(od: 50.8, length: 508)
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+
+        let genMetric = makeGen(units: .metric)
+        let genInches = makeGen(units: .inches)
+
+        var shape = SelectedShape(); shape.shapeData = ShapeData(type: .cylinder, dimensions: nil, isCuttable: true, stockInfo: stock)
+        let entry = PackEntry(shape: shape, packStartX: 0, rollOffset: 0)
+
+        let gcodeMetric = genMetric.generatePackGCode(entries: [entry])
+        let gcodeInches = genInches.generatePackGCode(entries: [entry])
+
+        XCTAssertTrue(gcodeMetric.contains("G21"), "Pack metric mode must emit G21")
+        XCTAssertFalse(gcodeMetric.contains("G20"), "Pack metric mode must not emit G20")
+        XCTAssertTrue(gcodeInches.contains("G20"), "Pack inch mode must emit G20")
+        XCTAssertFalse(gcodeInches.contains("G21"), "Pack inch mode must not emit G21")
+    }
+
+    func testPackModeG92InchConversion() {
+        let stock = makeRoundHSS(od: 50.8, length: 508)   // 508 mm = 20 in
+        stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
+
+        var shape = SelectedShape(); shape.shapeData = ShapeData(type: .cylinder, dimensions: nil, isCuttable: true, stockInfo: stock)
+        let entry = PackEntry(shape: shape, packStartX: 0, rollOffset: 0)
+
+        let gcodeInches = makeGen(units: .inches).generatePackGCode(entries: [entry])
+        XCTAssertTrue(gcodeInches.contains("G92 X20.0000"),
+                      "Pack inch mode G92 X must be 20.0000 for 508mm stock")
+    }
+
     // MARK: - Dynamic THC Tests
 
     func testDynamicTHCCodesPresent() {

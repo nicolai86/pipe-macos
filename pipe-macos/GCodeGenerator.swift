@@ -35,6 +35,19 @@ struct GlobalFeature {
     var globalA: CGFloat { feature.aCenterDeg + rollOffset }
 }
 
+// MARK: - Unit Mode
+
+/// Output unit system for generated G-code.
+///
+/// - `.metric`:  G21 — all linear coordinates in millimetres, feed rates in mm/min.
+/// - `.inches`:  G20 — all linear coordinates in inches, feed rates in in/min.
+///
+/// The A axis is always in degrees regardless of unit mode.
+enum GCodeUnit: String, CaseIterable {
+    case metric = "mm"
+    case inches = "in"
+}
+
 // MARK: - GCode Generation Settings
 
 /// All tunable parameters for G-code post-processing.
@@ -271,6 +284,19 @@ struct GCodeSettings {
     var enableDynamicTHC: Bool = true
 
     // -------------------------------------------------------------------------
+    // MARK: Unit Mode
+    // -------------------------------------------------------------------------
+
+    /// Output unit system for the generated G-code program.
+    ///
+    /// `.metric` (default) emits `G21` and outputs all linear values in mm / mm·min⁻¹.
+    /// `.inches` emits `G20` and outputs all linear values in inches / in·min⁻¹.
+    ///
+    /// All settings (feedRate, safeHeight, kerfWidth, etc.) are **always entered in mm**
+    /// regardless of this selection; the generator converts automatically on output.
+    var units: GCodeUnit = .metric
+
+    // -------------------------------------------------------------------------
     // MARK: Per-Axis Acceleration Limits
     // -------------------------------------------------------------------------
 
@@ -489,17 +515,17 @@ class GCodeGenerator {
             "(PACK G-CODE  —  \(entries.count) PIECE\(entries.count == 1 ? "" : "S"))",
             "(GENERATED: \(formatter.string(from: Date())))",
             refStock.profile == .round
-                ? "(STOCK: \(refStock.profile.rawValue)  OD \(fmt(refStock.od ?? 0))mm)"
-                : "(STOCK: \(refStock.profile.rawValue)  \(fmt(refStock.odX ?? 0))×\(fmt(refStock.odY ?? 0))mm)",
-            "(TOTAL STOCK LENGTH: \(fmt(totalLength))mm)",
+                ? "(STOCK: \(refStock.profile.rawValue)  OD \(fmtU(refStock.od ?? 0))\(unitLabel))"
+                : "(STOCK: \(refStock.profile.rawValue)  \(fmtU(refStock.odX ?? 0))×\(fmtU(refStock.odY ?? 0))\(unitLabel))",
+            "(TOTAL STOCK LENGTH: \(fmtU(totalLength))\(unitLabel))",
             "",
-            "G21             ; metric mode",
+            "\(unitModeWord)             ; \(unitModeComment)",
             "G90             ; absolute positioning",
             "G40             ; cancel cutter comp",
             "G49             ; cancel tool length offset",
-            "G92 X\(fmt(totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
+            "G92 X\(fmtU(totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
             "",
-            "G0 Z\(fmt(safeZ))     ; move to safe height",
+            "G0 Z\(fmtU(safeZ))     ; move to safe height",
             "M5              ; torch off (ensure)",
             "",
             "; === Cutting Pattern (free-end to chuck, \(entries.count) piece\(entries.count == 1 ? "" : "s")) ===",
@@ -1137,9 +1163,9 @@ class GCodeGenerator {
         let dynamicSafeZ = settings.enableDynamicSafeZ ? getDynamicSafeZ(stock: stock) : (pierceMp.Zm + settings.safeHeight)
         
         // Retract strictly BEFORE moving X, Y, A to avoid diagonal collisions during A-axis corner swings
-        lines.append("G0 Z\(fmt(dynamicSafeZ))  ; retract to asymmetric safe Z envelope")
-        lines.append("G0 X\(fmt(pierceMp.Xm)) Y\(fmt(pierceMp.Ym)) A\(fmt(pierceMp.Am)) ; rapid to pierce location")
-        lines.append("G0 Z\(fmt(pierceMp.Zm + settings.pierceHeight)) ; lower to pierce height")
+        lines.append("G0 Z\(fmtU(dynamicSafeZ))  ; retract to asymmetric safe Z envelope")
+        lines.append("G0 X\(fmtU(pierceMp.Xm)) Y\(fmtU(pierceMp.Ym)) A\(fmt(pierceMp.Am)) ; rapid to pierce location")
+        lines.append("G0 Z\(fmtU(pierceMp.Zm + settings.pierceHeight)) ; lower to pierce height")
         lines.append("M3 S1                         ; torch on")
 
         // Track the current THC state to inject toggles smoothly
@@ -1169,12 +1195,12 @@ class GCodeGenerator {
                 }
             }
             
-            lines.append("G1 X\(fmt(curr.Xm)) Y\(fmt(curr.Ym)) Z\(fmt(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmt(seg.finalF))")
+            lines.append("G1 X\(fmtU(curr.Xm)) Y\(fmtU(curr.Ym)) Z\(fmtU(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmtF(seg.finalF, segment: seg))")
         }
 
         // Torch Off and clean retract
         lines.append("M5                            ; torch off")
-        lines.append("G0 Z\(fmt(dynamicSafeZ))  ; retract to asymmetric safe Z envelope before next move")
+        lines.append("G0 Z\(fmtU(dynamicSafeZ))  ; retract to asymmetric safe Z envelope before next move")
         return (lines, machinePoints.last!.Am)
     }
 
@@ -1306,6 +1332,49 @@ class GCodeGenerator {
         return String(format: "%.3f", val)
     }
 
+    /// Format a linear coordinate value (mm internally) in the selected output unit.
+    /// Angles (degrees) are **not** passed through this — use `fmt` for those.
+    private func fmtU(_ val: CGFloat) -> String {
+        if settings.units == .inches {
+            return String(format: "%.4f", val / 25.4)
+        }
+        return String(format: "%.3f", val)
+    }
+
+    /// Format a feed-rate value (mm/min internally) in the selected output unit.
+    ///
+    /// For SimCNC G94 spoofed rates the 4D machine distance includes the A axis in
+    /// degrees, which does not scale with length.  The conversion factor is therefore
+    /// computed from the per-segment displacements so that the execution time (dt) is
+    /// preserved exactly when the controller operates in inch mode.
+    private func fmtF(_ val: CGFloat, segment: TrajectorySegment? = nil) -> String {
+        var rate = val
+        if settings.units == .inches {
+            if settings.useSimCNC, let seg = segment, seg.dMachine > 1e-9 {
+                // dMachine_in = √((ΔX/25.4)² + (ΔY/25.4)² + (ΔZ/25.4)² + ΔA²)
+                let dMachineIn = sqrt(
+                    pow(seg.dXm / 25.4, 2) +
+                    pow(seg.dYm / 25.4, 2) +
+                    pow(seg.dZm / 25.4, 2) +
+                    pow(seg.dAm, 2)
+                )
+                rate = val * dMachineIn / seg.dMachine
+            } else {
+                rate = val / 25.4
+            }
+        }
+        return String(format: "%.3f", rate)
+    }
+
+    /// Unit label for use in G-code comments.
+    private var unitLabel: String { settings.units == .inches ? "in" : "mm" }
+
+    /// G20/G21 mode word.
+    private var unitModeWord: String { settings.units == .inches ? "G20" : "G21" }
+
+    /// Human-readable unit mode description.
+    private var unitModeComment: String { settings.units == .inches ? "inch mode" : "metric mode" }
+
     private func sortFeatures(_ features: [SurfaceFeature]) -> [SurfaceFeature] {
         return features.sorted { a, b in
             func priority(_ t: SurfaceFeatureType) -> Int {
@@ -1333,25 +1402,25 @@ class GCodeGenerator {
         ]
         
         if stock.profile == .round {
-            header.append("(OD: \(fmt(stock.od ?? 0))mm)")
+            header.append("(OD: \(fmtU(stock.od ?? 0))\(unitLabel))")
         } else {
-            header.append("(OD: \(fmt(stock.odX ?? 0))mm x \(fmt(stock.odY ?? 0))mm)")
+            header.append("(OD: \(fmtU(stock.odX ?? 0))\(unitLabel) x \(fmtU(stock.odY ?? 0))\(unitLabel))")
         }
-        
-        header.append("(LENGTH: \(fmt(stock.length))mm)")
+
+        header.append("(LENGTH: \(fmtU(stock.length))\(unitLabel))")
         return header
     }
 
     private func generateStartupSequence(totalLength: CGFloat, stock: StockInfo, packMode: Bool = false, count: Int = 1) -> [String] {
         let safeZ = settings.enableDynamicSafeZ ? getDynamicSafeZ(stock: stock) : settings.safeHeight
         return [
-            "G21             ; metric mode",
+            "\(unitModeWord)             ; \(unitModeComment)",
             "G90             ; absolute positioning",
             "G40             ; cancel cutter comp",
             "G49             ; cancel tool length offset",
-            "G92 X\(fmt(totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
+            "G92 X\(fmtU(totalLength)) Y0 Z0 A0 ; set current position as right-most free end",
             "",
-            "G0 Z\(fmt(safeZ))     ; move to safe height",
+            "G0 Z\(fmtU(safeZ))     ; move to safe height",
             "M5              ; torch off (ensure)",
             "",
             packMode ? "; === Cutting Pattern (right-to-left, \(count) piece\(count == 1 ? "" : "s")) ===" : "; === Cutting Pattern ==="
@@ -1363,7 +1432,7 @@ class GCodeGenerator {
         return [
             "; === Program End ===",
             "M5              ; torch off (redundant safety)",
-            "G0 Z\(fmt(safeZ))  ; retract to safe height",
+            "G0 Z\(fmtU(safeZ))  ; retract to safe height",
             "G0 X0 Y0 A0     ; return to home (TCP centered)",
             "M30             ; end of program",
             "%"
