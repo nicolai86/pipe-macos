@@ -298,6 +298,17 @@ struct ShapeOverride {
     var quantity: Int = 1
 }
 
+/// Bundles the SceneKit scene with the camera-fitting metadata computed in buildPackScene.
+/// Stored as a single @Published value so scene and dimensions update atomically.
+struct PackSceneBundle: Equatable {
+    let scene: SCNScene
+    let contentLength: Float
+    let halfHeight: Float
+    /// Maps each shape's UUID to its pack-view SCNNodes (one per quantity copy).
+    let shapeNodes: [UUID: [SCNNode]]
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.scene === rhs.scene }
+}
+
 class AppViewModel: ObservableObject {
     @Published var loadedModel: Model3D?
     @Published var selectedShape: SelectedShape?
@@ -305,7 +316,7 @@ class AppViewModel: ObservableObject {
     @Published var generatedGCode: String?
     @Published var generatedGCodePacks: [String] = []
     @Published var viewMode: ViewMode = .solid
-    @Published var packScene: SCNScene?
+    @Published var packSceneBundle: PackSceneBundle?
     @Published var shapeOverrides: [UUID: ShapeOverride] = [:]
     @Published var simRunning = false
     @Published var simSpeedMultiplier: Float = 10.0  // 1× = real time, 10× = 10 times faster
@@ -377,14 +388,16 @@ class AppViewModel: ObservableObject {
         guard let selected = shape, let stock = selected.stockInfo,
               let all = loadedModel?.selectableShapes else {
             matchingShapes = []
-            packScene = nil
+            packSceneBundle = nil
             stopSim()
             return
         }
         matchingShapes = all.filter { other in
             other != selected && other.stockInfo.map { profileMatches(stock, $0) } == true
         }
-        buildPackScene()
+        // Defer so SwiftUI commits selectedShape + matchingShapes in one pass
+        // before the pack scene (which depends on both) is built.
+        DispatchQueue.main.async { [weak self] in self?.buildPackScene() }
     }
 
     func profileMatches(_ a: StockInfo, _ b: StockInfo) -> Bool {
@@ -420,7 +433,7 @@ class AppViewModel: ObservableObject {
                 self.selectedShape = nil
                 self.matchingShapes = []
                 self.generatedGCode = nil
-                self.packScene = nil
+                self.packSceneBundle = nil
                 self.shapeOverrides = [:]
                 self.loadedModel = model
             }
@@ -610,7 +623,7 @@ class AppViewModel: ObservableObject {
         simSegmentIdx = 0
         simSegmentElapsed = 0
         guard let selected = selectedShape, selected.stockInfo != nil else {
-            packScene = nil
+            packSceneBundle = nil
             return
         }
 
@@ -654,6 +667,7 @@ class AppViewModel: ObservableObject {
         currentPackCount = packGroups.count
         let packDividerGap: Float = 60.0   // extra space between packs in scene
         var nodeIdx = 0
+        var shapeNodes: [UUID: [SCNNode]] = [:]
 
         /// Renders one piece at the current packX and advances packX.
         func addPieceNode(_ piece: ExpandedPiece) {
@@ -688,6 +702,7 @@ class AppViewModel: ObservableObject {
             packGeometry.materials = [mat]
             let node = SCNNode(geometry: packGeometry)
             node.name = "pack_\(nodeIdx)"; nodeIdx += 1
+            shapeNodes[piece.shape.id, default: []].append(node)
             stockGroup.addChildNode(node)
             packX += length + gap
         }
@@ -740,18 +755,28 @@ class AppViewModel: ObservableObject {
         torchNode.name = "torch"
         scene.rootNode.addChildNode(torchNode)
 
-        // Camera: look at full initial stock range, torch on the right
-        let camDist = max(maxCross * 3.5, totalLength * 0.5)
+        // Camera: orthographic so the stock fills the fixed-height pack view regardless of
+        // pack length. orthographicScale = half the world-unit height we want visible.
+        // We show: stock cross-section + torch standoff + torch body + 15% margin.
+        let visibleHalfHeight = (maxCross / 2.0 + simTorchHeight * 1.6) * 1.15
         let cameraNode = SCNNode()
+        cameraNode.name = "packCamera"
         let camera = SCNCamera()
         camera.zFar = 100000.0
+        camera.zNear = 1.0
+        camera.usesOrthographicProjection = true
+        camera.orthographicScale = Double(visibleHalfHeight)
         cameraNode.camera = camera
         let cx = totalLength / 2.0
-        cameraNode.position = SCNVector3(cx, maxCross * 1.5, camDist)
-        cameraNode.look(at: SCNVector3(cx, 0, 0))
+        // Position straight ahead on Z; Y centred on the torch (slightly above tube axis).
+        let torchCentreY = maxCross / 2.0 + simTorchHeight / 2.0
+        cameraNode.position = SCNVector3(cx, torchCentreY * 0.4, 2000)
+        cameraNode.look(at: SCNVector3(cx, torchCentreY * 0.4, 0))
         scene.rootNode.addChildNode(cameraNode)
 
-        packScene = scene
+        // Bundle scene with its camera-fitting metadata so they update atomically.
+        packSceneBundle = PackSceneBundle(scene: scene, contentLength: totalLength,
+                                          halfHeight: visibleHalfHeight, shapeNodes: shapeNodes)
         // Position the torch at the initial "parked" state (free end, retracted)
         applySimState(gcodeX: simTotalLength, gcodeA: 0, torchOn: false)
     }
@@ -812,7 +837,7 @@ class AppViewModel: ObservableObject {
     }
 
     private func applySimState(gcodeX: Float, gcodeA: Float, torchOn: Bool) {
-        guard let scene = packScene,
+        guard let scene = packSceneBundle?.scene,
               let stockGroup = scene.rootNode.childNode(withName: "stockGroup", recursively: false) else { return }
 
         // Stock moves axially so the cut point (gcodeX in pack space) lines up with the
@@ -1020,7 +1045,7 @@ struct PackView: View {
     var sidebarWidth: CGFloat
 
     var body: some View {
-        if let scene = viewModel.packScene {
+        if let bundle = viewModel.packSceneBundle {
             VStack(spacing: 0) {
                 Divider()
                 HStack(spacing: 0) {
@@ -1043,7 +1068,7 @@ struct PackView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
 
-                        PackSceneView(scene: scene)
+                        PackSceneView(bundle: bundle, hoveredShape: viewModel.hoveredShape)
                             .frame(height: 180)
 
                         // Simulation controls
@@ -1088,21 +1113,66 @@ struct PackView: View {
 }
 
 struct PackSceneView: NSViewRepresentable {
-    let scene: SCNScene
+    let bundle: PackSceneBundle
+    let hoveredShape: SelectedShape?
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    class Coordinator {
+        var lastBundle: PackSceneBundle?
+        var lastHoveredID: UUID?
+    }
 
     func makeNSView(context: Context) -> SCNView {
         let scnView = SCNView()
         scnView.allowsCameraControl = true
         scnView.autoenablesDefaultLighting = false
         scnView.backgroundColor = NSColor(white: 0.05, alpha: 1.0)
-        scnView.scene = scene
+        scnView.scene = bundle.scene
         return scnView
     }
 
     func updateNSView(_ scnView: SCNView, context: Context) {
-        if scnView.scene !== scene {
-            scnView.scene = scene
+        let c = context.coordinator
+        if c.lastBundle != bundle {
+            c.lastBundle = bundle
+            scnView.scene = bundle.scene
+            DispatchQueue.main.async { self.refitCamera(in: scnView) }
         }
+        let newHoveredID = hoveredShape?.id
+        if c.lastHoveredID != newHoveredID {
+            c.lastHoveredID = newHoveredID
+            applyHover()
+        }
+    }
+
+    private func applyHover() {
+        // Clear emission on all pack nodes, then set lime-green on the hovered shape's nodes.
+        for nodes in bundle.shapeNodes.values {
+            for node in nodes {
+                node.geometry?.firstMaterial?.emission.contents = NSColor.clear
+            }
+        }
+        if let id = hoveredShape?.id, let nodes = bundle.shapeNodes[id] {
+            let limeGreen = NSColor(red: 0.1, green: 1.0, blue: 0.2, alpha: 1.0)
+            for node in nodes { node.geometry?.firstMaterial?.emission.contents = limeGreen }
+        }
+    }
+
+    private func refitCamera(in scnView: SCNView) {
+        guard let cameraNode = scnView.pointOfView,
+              let camera = cameraNode.camera else { return }
+        let viewW = Float(scnView.bounds.width)
+        let viewH = Float(scnView.bounds.height)
+        guard viewH > 0 else { return }
+        let scaleForHeight = bundle.halfHeight
+        let scaleForWidth = viewW > 0 ? (bundle.contentLength / 2.0) / (viewW / viewH) : scaleForHeight
+        let scale = max(scaleForHeight, scaleForWidth) * 1.05
+        camera.orthographicScale = Double(scale)
+        let cx = bundle.contentLength / 2.0
+        let currentY = Float(cameraNode.position.y)
+        cameraNode.position = SCNVector3(cx, currentY, Float(cameraNode.position.z))
+        cameraNode.look(at: SCNVector3(cx, currentY, 0))
     }
 }
 
