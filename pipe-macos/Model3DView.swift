@@ -89,6 +89,15 @@ struct SceneKitView: NSViewRepresentable {
         case .light: scnView.backgroundColor = NSColor(white: 0.85, alpha: 1.0)
         }
 
+        // Re-apply the full highlight state so sidebar hover changes are reflected
+        // without requiring the user to click inside the 3D view.
+        ShapeSelector().highlight(
+            viewModel.selectedShape,
+            matching: viewModel.matchingShapes,
+            hovered: viewModel.hoveredShape,
+            in: scnView
+        )
+
         scnView.needsDisplay = true
     }
     
@@ -161,8 +170,8 @@ class Coordinator: NSObject {
 
         if let result = hitResults.first(where: { $0.node.name?.hasPrefix("model_") == true }),
            let selected = viewModel.loadedModel?.selectableShapes.first(where: { $0.node === result.node }) {
-            viewModel.selectShape(selected)
-            selector.highlight(selected, matching: viewModel.matchingShapes, in: scnView)
+            viewModel.selectShape(selected)   // also clears hoveredShape
+            selector.highlight(selected, matching: viewModel.matchingShapes, hovered: nil, in: scnView)
         } else {
             viewModel.selectShape(nil)
             selector.highlight(nil, in: scnView)

@@ -215,16 +215,33 @@ struct SidePanelView: View {
 
                         ForEach(Array(viewModel.matchingShapes.enumerated()), id: \.offset) { idx, shape in
                             if let stock = shape.stockInfo {
+                                let isHovered = viewModel.hoveredShape == shape
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Match \(idx + 1)")
                                         .font(.caption)
                                         .fontWeight(.semibold)
-                                        .foregroundColor(Color(red: 0, green: 0.7, blue: 1.0))
+                                        .foregroundColor(isHovered
+                                            ? Color(red: 0.1, green: 1.0, blue: 0.2)
+                                            : Color(red: 0, green: 0.7, blue: 1.0))
                                     Text(viewModel.stockSummaryText(for: stock))
                                         .font(.system(.caption, design: .monospaced))
                                         .foregroundColor(.primary)
                                 }
                                 .padding(.vertical, 4)
+                                .padding(.horizontal, 4)
+                                .background(
+                                    isHovered
+                                        ? Color(red: 0.1, green: 1.0, blue: 0.2).opacity(0.08)
+                                        : Color.clear
+                                )
+                                .cornerRadius(4)
+                                .contentShape(Rectangle())
+                                .onHover { hovering in
+                                    if hovering {
+                                        viewModel.hoveredShape = shape
+                                    }
+                                    // Don't clear on hover-end — highlight persists in 3D view.
+                                }
                                 if idx < viewModel.matchingShapes.count - 1 {
                                     Divider().opacity(0.4)
                                 }
@@ -296,6 +313,8 @@ class AppViewModel: ObservableObject {
     @Published var stockTubeLength: Double = 6000.0
     /// Number of packs in the current layout, updated by buildPackScene (source of truth).
     @Published var currentPackCount: Int = 1
+    /// The matching shape currently highlighted via sidebar hover (persists when moving into 3D view).
+    @Published var hoveredShape: SelectedShape?
     private var simTimer: Timer?
     private var simTotalLength: Float = 0
     private var simStockRadius: Float = 30.0
@@ -354,6 +373,7 @@ class AppViewModel: ObservableObject {
     // Called from the main thread (gesture recognizer callback) — no async dispatch needed.
     func selectShape(_ shape: SelectedShape?) {
         selectedShape = shape
+        hoveredShape = nil          // new click clears any sidebar hover
         guard let selected = shape, let stock = selected.stockInfo,
               let all = loadedModel?.selectableShapes else {
             matchingShapes = []
