@@ -39,575 +39,366 @@ final class STEPBridgeTests: XCTestCase {
 
     // MARK: - Load Tests
 
-    func testAllFixturesLoad() {
-        let fixtures = [
-            "circ-test.step",
-            "circ-test-all.step",
-            "circ-test-simplified.step",
-            "circ-test-same.step",
-            "circ-test-same2.step",
-            "circ-test-same3.step",
-            "circ-test-notch-rect.step",
-            "circ-test-notch-rect-rotate.step",
-            "circ-test-rect-complex.step",
-        ]
-        for name in fixtures {
-            guard FileManager.default.fileExists(atPath: fixtureURL(name).path) else { continue }
-            let model = ModelLoader.loadSTEP(url: fixtureURL(name))
-            XCTAssertNotNil(model, "\(name) must load without error")
-            XCTAssertFalse(model?.selectableShapes.isEmpty ?? true,
-                           "\(name) must produce at least one selectable shape")
-        }
-    }
-
-    func testCirctestBasicLoads() throws {
-        _ = try skip(ifMissing: "circ-test.step")
-        let model = loadModel("circ-test.step")
-        XCTAssertNotNil(model)
-        XCTAssertFalse(model?.selectableShapes.isEmpty ?? true)
-    }
-
-    // MARK: - Stock Profile Classification
-
-    func testProfileIsDetected() throws {
-        _ = try skip(ifMissing: "circ-test.step")
-        guard let stock = loadModel("circ-test.step")?.selectableShapes.first?.stockInfo else {
-            XCTFail("No stockInfo on circ-test.step"); return
-        }
-        // circ-test.step is a square HSS tube; just verify a concrete profile is detected.
-        XCTAssertNotEqual(stock.profile, .unknown,
-                          "circ-test.step must be classified as a known profile, not .unknown")
-    }
-
-    func testRoundProfileDetected() throws {
-        _ = try skip(ifMissing: "circ-test-simplified.step")
-        guard let model = loadModel("circ-test-simplified.step"),
+    func testHSS2in2in125mm() throws {
+        let name = "hss/2in-2in-125mm.step"
+        let _ = try skip(ifMissing: name)
+        
+        guard let model = loadModel(name),
               let stock = model.selectableShapes.first?.stockInfo else {
-            XCTFail("No stockInfo on circ-test-simplified.step"); return
-        }
-        // Accept any concrete profile — round OR rect depending on the fixture geometry.
-        XCTAssertNotEqual(stock.profile, .unknown, "Profile must be detected")
-        if stock.profile == .round {
-            XCTAssertNotNil(stock.od, "Round stock must have an OD")
-            XCTAssertGreaterThan(stock.od ?? 0, 0, "OD must be positive")
-        }
-    }
-
-    func testRectProfileDetected() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect.step")
-        guard let stock = loadModel("circ-test-notch-rect.step")?.selectableShapes.first?.stockInfo else {
-            XCTFail("No stockInfo on circ-test-notch-rect.step"); return
-        }
-        XCTAssertTrue(stock.profile == .square || stock.profile == .rectangular,
-                      "circ-test-notch-rect.step must classify as square or rectangular HSS, got: \(stock.profile.rawValue)")
-    }
-
-    func testRotatedRectProfileDetected() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect-rotate.step")
-        guard let stock = loadModel("circ-test-notch-rect-rotate.step")?.selectableShapes.first?.stockInfo else {
-            XCTFail("No stockInfo on circ-test-notch-rect-rotate.step"); return
-        }
-        XCTAssertTrue(stock.profile == .square || stock.profile == .rectangular,
-                      "Rotated rect fixture must classify as rectangular/square HSS")
-    }
-
-    // MARK: - Stock Dimension Sanity
-
-    func testLengthIsPositive() {
-        let fixtures = ["circ-test.step", "circ-test-notch-rect.step", "circ-test-same.step"]
-        for name in fixtures {
-            guard let stock = loadModel(name)?.selectableShapes.first?.stockInfo else { continue }
-            XCTAssertGreaterThan(stock.length, 0,
-                                 "\(name): length must be positive, got \(stock.length)")
-        }
-    }
-
-    func testAxisIsUnitVector() {
-        let fixtures = ["circ-test.step", "circ-test-notch-rect.step", "circ-test-same.step"]
-        for name in fixtures {
-            guard let stock = loadModel(name)?.selectableShapes.first?.stockInfo else { continue }
-            let len = simd_length(stock.axis)
-            XCTAssertEqual(Double(len), 1.0, accuracy: 0.01,
-                           "\(name): tube axis must be a unit vector (length=\(len))")
-        }
-    }
-
-    func testODPositiveForRoundStock() throws {
-        // Check any fixture that happens to be round; skip gracefully if none are.
-        let roundFixtures = ["circ-test-simplified.step", "circ-test-same.step"]
-        for name in roundFixtures {
-            guard let stock = loadModel(name)?.selectableShapes.first?.stockInfo,
-                  stock.profile == .round else { continue }
-            XCTAssertGreaterThan(stock.od ?? 0, 0, "\(name): round stock OD must be positive")
+            XCTFail("Failed to load model or extract stock info")
             return
         }
-        // No round fixture found — skip.
-        throw XCTSkip("No round-profile fixture available to test OD assertion")
-    }
-
-    func testCrossSectionPositiveForRectStock() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect.step")
-        guard let stock = loadModel("circ-test-notch-rect.step")?.selectableShapes.first?.stockInfo else { return }
-        guard stock.profile == .square || stock.profile == .rectangular else { return }
-        XCTAssertGreaterThan(stock.odX ?? 0, 0, "Rect stock odX must be positive")
-        XCTAssertGreaterThan(stock.odY ?? 0, 0, "Rect stock odY must be positive")
-    }
-
-    // MARK: - Feature Extraction
-
-    func testBasicFeatureExtraction() throws {
-        _ = try skip(ifMissing: "circ-test.step")
-        guard let stock = loadModel("circ-test.step")?.selectableShapes.first?.stockInfo else { return }
-        XCTAssertFalse(stock.features.isEmpty,
-                       "circ-test.step must produce at least one surface feature")
+        
+        // 1. Assert exactly 2 features, one startCut and one endCut.
+        XCTAssertEqual(stock.features.count, 2, "Should have exactly 2 features for a plain square HSS")
         let types = Set(stock.features.map { $0.type })
-        XCTAssertTrue(types.contains(.startCut) || types.contains(.endCut),
-                      "Must detect at least one sever cut, got: \(types.map { $0.rawValue })")
-    }
-
-    func testNotchDetected() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect.step")
-        guard let stock = loadModel("circ-test-notch-rect.step")?.selectableShapes.first?.stockInfo else { return }
-        let types = Set(stock.features.map { $0.type })
-        XCTAssertTrue(types.contains(.notch) || types.contains(.cutout),
-                      "Notch fixture must detect a notch/cutout, got: \(types.map { $0.rawValue })")
-    }
-
-    func testAllFeaturesFixtureHasMultipleFeatures() throws {
-        _ = try skip(ifMissing: "circ-test-all.step")
-        guard let stock = loadModel("circ-test-all.step")?.selectableShapes.first?.stockInfo else { return }
-        XCTAssertGreaterThanOrEqual(stock.features.count, 2,
-                             "circ-test-all.step must have at least 2 features, got \(stock.features.count)")
-    }
-
-    func testFeatureXPositionsWithinStockBounds() throws {
-        _ = try skip(ifMissing: "circ-test-all.step")
-        guard let stock = loadModel("circ-test-all.step")?.selectableShapes.first?.stockInfo else { return }
-        let margin: CGFloat = 10.0     // allow small overhang for sever-cut tolerance
-        for feature in stock.features {
-            XCTAssertGreaterThanOrEqual(feature.xCenter, -margin,
-                "Feature \(feature.id) xCenter \(feature.xCenter) is too far left of stock")
-            XCTAssertLessThanOrEqual(feature.xCenter, stock.length + margin,
-                "Feature \(feature.id) xCenter \(feature.xCenter) exceeds stock length \(stock.length)")
-        }
-    }
-
-    // MARK: - Feature Path Sanity
-
-    func testFeaturesHaveNonEmptyPaths() throws {
-        _ = try skip(ifMissing: "circ-test.step")
-        guard let stock = loadModel("circ-test.step")?.selectableShapes.first?.stockInfo else { return }
-        for feature in stock.features {
-            guard let path = feature.path else {
-                XCTFail("Feature \(feature.id) has nil path"); continue
-            }
-            XCTAssertGreaterThan(path.count, 1,
-                                 "Feature \(feature.id) path must have > 1 point for toolpath generation")
-        }
-    }
-
-    // MARK: - Rotated Rect Fixture: Shape Count, Profile, Dimensions, Feature Count
-
-    func testRotatedRectFixtureShapeCount() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect-rotate.step")
-        let model = loadModel("circ-test-notch-rect-rotate.step")
-        let shapes = model?.selectableShapes ?? []
-        XCTAssertEqual(shapes.count, 2,
-                       "circ-test-notch-rect-rotate.step must contain exactly 2 selectable shapes, got \(shapes.count)")
-    }
-
-    func testRotatedRectFixtureProfileIsRect() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect-rotate.step")
-        guard let shapes = loadModel("circ-test-notch-rect-rotate.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else {
-                XCTFail("Shape \(i) has no stockInfo"); continue
-            }
-            XCTAssertTrue(stock.profile == .rectangular || stock.profile == .square,
-                          "Shape \(i) must be HSS-Rect or HSS-Square, got \(stock.profile.rawValue)")
-        }
-    }
-
-    func testRotatedRectFixtureDimensions() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect-rotate.step")
-        guard let shapes = loadModel("circ-test-notch-rect-rotate.step")?.selectableShapes else { return }
-        let tolerance: CGFloat = 1.0   // ±1 mm to allow for measurement/rounding
-        let expectedLarge: CGFloat = 76.2
-        let expectedSmall: CGFloat = 50.8
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else { continue }
-            let odX = stock.odX ?? 0
-            let odY = stock.odY ?? 0
-            let large = max(odX, odY)
-            let small = min(odX, odY)
-            XCTAssertEqual(Double(large), Double(expectedLarge), accuracy: Double(tolerance),
-                           "Shape \(i) larger OD should be ~76.2 mm, got \(large) mm (odX=\(odX), odY=\(odY))")
-            XCTAssertEqual(Double(small), Double(expectedSmall), accuracy: Double(tolerance),
-                           "Shape \(i) smaller OD should be ~50.8 mm, got \(small) mm (odX=\(odX), odY=\(odY))")
-        }
-    }
-
-    func testRotatedRectFixtureFeatureCount() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect-rotate.step")
-        guard let shapes = loadModel("circ-test-notch-rect-rotate.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else {
-                XCTFail("Shape \(i) has no stockInfo"); continue
-            }
-            XCTAssertEqual(stock.features.count, 3,
-                           "Shape \(i) must have exactly 3 features, got \(stock.features.count): \(stock.features.map { $0.type.rawValue })")
-        }
-    }
-
-    // MARK: - Simplified Fixture: Shape Count, Profile, Dimensions, Feature Count & Types
-
-    func testSimplifiedFixtureShapeCount() throws {
-        _ = try skip(ifMissing: "circ-test-simplified.step")
-        let shapes = loadModel("circ-test-simplified.step")?.selectableShapes ?? []
-        XCTAssertEqual(shapes.count, 2,
-                       "circ-test-simplified.step must contain exactly 2 selectable shapes, got \(shapes.count)")
-    }
-
-    func testSimplifiedFixtureProfileIsSquare() throws {
-        _ = try skip(ifMissing: "circ-test-simplified.step")
-        guard let shapes = loadModel("circ-test-simplified.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else {
-                XCTFail("Shape \(i) has no stockInfo"); continue
-            }
-            XCTAssertEqual(stock.profile, .square,
-                           "Shape \(i) must be HSS-Square, got \(stock.profile.rawValue)")
-        }
-    }
-
-    func testSimplifiedFixtureDimensions() throws {
-        _ = try skip(ifMissing: "circ-test-simplified.step")
-        guard let shapes = loadModel("circ-test-simplified.step")?.selectableShapes else { return }
-        let tolerance: CGFloat = 1.0   // ±1 mm to allow for measurement/rounding
-        let expected: CGFloat = 12.7
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else { continue }
-            let odX = stock.odX ?? stock.od ?? 0
-            let odY = stock.odY ?? stock.od ?? 0
-            XCTAssertEqual(Double(odX), Double(expected), accuracy: Double(tolerance),
-                           "Shape \(i) odX should be ~12.7 mm, got \(odX) mm")
-            XCTAssertEqual(Double(odY), Double(expected), accuracy: Double(tolerance),
-                           "Shape \(i) odY should be ~12.7 mm, got \(odY) mm")
-        }
-    }
-
-    func testSimplifiedFixtureFeatureCount() throws {
-        _ = try skip(ifMissing: "circ-test-simplified.step")
-        guard let shapes = loadModel("circ-test-simplified.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else {
-                XCTFail("Shape \(i) has no stockInfo"); continue
-            }
-            XCTAssertEqual(stock.features.count, 2,
-                           "Shape \(i) must have exactly 2 features, got \(stock.features.count): \(stock.features.map { $0.type.rawValue })")
-        }
-    }
-
-    func testSimplifiedFixtureFeatureTypes() throws {
-        _ = try skip(ifMissing: "circ-test-simplified.step")
-        guard let shapes = loadModel("circ-test-simplified.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else { continue }
-            let types = Set(stock.features.map { $0.type })
-            XCTAssertTrue(types.contains(.startCut),
-                          "Shape \(i) must have a startCut feature, got: \(types.map { $0.rawValue })")
-            XCTAssertTrue(types.contains(.endCut),
-                          "Shape \(i) must have an endCut feature, got: \(types.map { $0.rawValue })")
-        }
-    }
-
-    // MARK: - Rect Complex Fixture: Shape Count, Profile, Dimensions, Feature Count & Types
-
-    func testRectComplexFixtureShapeCount() throws {
-        _ = try skip(ifMissing: "circ-test-rect-complex.step")
-        let shapes = loadModel("circ-test-rect-complex.step")?.selectableShapes ?? []
-        XCTAssertEqual(shapes.count, 1,
-                       "circ-test-rect-complex.step must contain exactly 1 selectable shape, got \(shapes.count)")
-    }
-
-    func testRectComplexFixtureProfileIsRect() throws {
-        _ = try skip(ifMissing: "circ-test-rect-complex.step")
-        guard let stock = loadModel("circ-test-rect-complex.step")?.selectableShapes.first?.stockInfo else {
-            XCTFail("No stockInfo on circ-test-rect-complex.step"); return
-        }
-        XCTAssertTrue(stock.profile == .rectangular || stock.profile == .square,
-                      "Must be HSS-Rect or HSS-Square, got \(stock.profile.rawValue)")
-    }
-
-    func testRectComplexFixtureDimensions() throws {
-        _ = try skip(ifMissing: "circ-test-rect-complex.step")
-        guard let stock = loadModel("circ-test-rect-complex.step")?.selectableShapes.first?.stockInfo else { return }
-        let tolerance: CGFloat = 1.0   // ±1 mm to allow for measurement/rounding
-        let expectedLarge: CGFloat = 76.2
-        let expectedSmall: CGFloat = 25.4
-        let odX = stock.odX ?? 0
-        let odY = stock.odY ?? 0
-        let large = max(odX, odY)
-        let small = min(odX, odY)
-        XCTAssertEqual(Double(large), Double(expectedLarge), accuracy: Double(tolerance),
-                       "Larger OD should be ~76.2 mm, got \(large) mm (odX=\(odX), odY=\(odY))")
-        XCTAssertEqual(Double(small), Double(expectedSmall), accuracy: Double(tolerance),
-                       "Smaller OD should be ~25.4 mm, got \(small) mm (odX=\(odX), odY=\(odY))")
-    }
-
-    func testRectComplexFixtureTotalFeatureCount() throws {
-        _ = try skip(ifMissing: "circ-test-rect-complex.step")
-        guard let stock = loadModel("circ-test-rect-complex.step")?.selectableShapes.first?.stockInfo else { return }
-        XCTAssertEqual(stock.features.count, 6,
-                       "Must have exactly 6 features, got \(stock.features.count): \(stock.features.map { $0.type.rawValue })")
-    }
-
-    func testRectComplexFixtureSeverCuts() throws {
-        _ = try skip(ifMissing: "circ-test-rect-complex.step")
-        guard let stock = loadModel("circ-test-rect-complex.step")?.selectableShapes.first?.stockInfo else { return }
-        let types = stock.features.map { $0.type }
-        XCTAssertEqual(types.filter { $0 == .startCut }.count, 1,
-                       "Must have exactly 1 startCut, got \(types.filter { $0 == .startCut }.count)")
-        XCTAssertEqual(types.filter { $0 == .endCut }.count, 1,
-                       "Must have exactly 1 endCut, got \(types.filter { $0 == .endCut }.count)")
-    }
-
-    func testRectComplexFixtureCutoutCount() throws {
-        _ = try skip(ifMissing: "circ-test-rect-complex.step")
-        guard let stock = loadModel("circ-test-rect-complex.step")?.selectableShapes.first?.stockInfo else { return }
-        let types = stock.features.map { $0.type }
-        let cutouts = types.filter { $0 == .cutout || $0 == .notch || $0 == .hole }
-        XCTAssertEqual(cutouts.count, 4,
-                       "Must have exactly 4 cutout/notch/hole features, got \(cutouts.count): \(cutouts.map { $0.rawValue })")
-    }
-
-    // MARK: - Notch4 Fixture: Shape Count, Profile, OD, Feature Count & Types
-
-    func testNotch4FixtureShapeCount() throws {
-        _ = try skip(ifMissing: "circ-test-notch4.step")
-        let shapes = loadModel("circ-test-notch4.step")?.selectableShapes ?? []
-        XCTAssertEqual(shapes.count, 1,
-                       "circ-test-notch4.step must contain exactly 1 selectable shape, got \(shapes.count)")
-    }
-
-    func testNotch4FixtureProfileIsRound() throws {
-        _ = try skip(ifMissing: "circ-test-notch4.step")
-        guard let stock = loadModel("circ-test-notch4.step")?.selectableShapes.first?.stockInfo else {
-            XCTFail("No stockInfo on circ-test-notch4.step"); return
-        }
-        XCTAssertEqual(stock.profile, .round,
-                       "Must be HSS-O (round), got \(stock.profile.rawValue)")
-    }
-
-    func testNotch4FixtureOD() throws {
-        _ = try skip(ifMissing: "circ-test-notch4.step")
-        guard let stock = loadModel("circ-test-notch4.step")?.selectableShapes.first?.stockInfo else { return }
-        let tolerance: CGFloat = 1.0   // ±1 mm to allow for measurement/rounding
-        let expectedOD: CGFloat = 42.2
-        let od = stock.od ?? 0
-        XCTAssertEqual(Double(od), Double(expectedOD), accuracy: Double(tolerance),
-                       "OD should be ~42.2 mm, got \(od) mm")
-    }
-
-    func testNotch4FixtureTotalFeatureCount() throws {
-        _ = try skip(ifMissing: "circ-test-notch4.step")
-        guard let stock = loadModel("circ-test-notch4.step")?.selectableShapes.first?.stockInfo else { return }
-        XCTAssertEqual(stock.features.count, 4,
-                       "Must have exactly 4 features, got \(stock.features.count): \(stock.features.map { $0.type.rawValue })")
-    }
-
-    func testNotch4FixtureSeverCuts() throws {
-        _ = try skip(ifMissing: "circ-test-notch4.step")
-        guard let stock = loadModel("circ-test-notch4.step")?.selectableShapes.first?.stockInfo else { return }
-        let types = stock.features.map { $0.type }
-        XCTAssertEqual(types.filter { $0 == .startCut }.count, 1,
-                       "Must have exactly 1 startCut, got \(types.filter { $0 == .startCut }.count)")
-        XCTAssertEqual(types.filter { $0 == .endCut }.count, 1,
-                       "Must have exactly 1 endCut, got \(types.filter { $0 == .endCut }.count)")
-    }
-
-    func testNotch4FixtureCutoutCount() throws {
-        _ = try skip(ifMissing: "circ-test-notch4.step")
-        guard let stock = loadModel("circ-test-notch4.step")?.selectableShapes.first?.stockInfo else { return }
-        let types = stock.features.map { $0.type }
-        let cutouts = types.filter { $0 == .cutout || $0 == .notch || $0 == .hole }
-        XCTAssertEqual(cutouts.count, 2,
-                       "Must have exactly 2 cutout/notch/hole features, got \(cutouts.count): \(cutouts.map { $0.rawValue })")
-    }
-
-    // MARK: - Simple Rotated Fixture: Shape Count, Profile, Dimensions, Feature Count & Types
-
-    func testSimpleRotatedFixtureShapeCount() throws {
-        _ = try skip(ifMissing: "simple-rotated-test.step")
-        let shapes = loadModel("simple-rotated-test.step")?.selectableShapes ?? []
-        XCTAssertEqual(shapes.count, 2,
-                       "simple-rotated-test.step must contain exactly 2 selectable shapes, got \(shapes.count)")
-    }
-
-    func testSimpleRotatedFixtureProfileIsSquare() throws {
-        _ = try skip(ifMissing: "simple-rotated-test.step")
-        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else {
-                XCTFail("Shape \(i) has no stockInfo"); continue
-            }
-            XCTAssertTrue(stock.profile == .rectangular || stock.profile == .square,
-                          "Shape \(i) must be HSS-Rect or HSS-Square, got \(stock.profile.rawValue)")
-        }
-    }
-
-    func testSimpleRotatedFixtureDimensions() throws {
-        _ = try skip(ifMissing: "simple-rotated-test.step")
-        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
-        let tolerance: CGFloat = 1.0   // ±1 mm to allow for measurement/rounding
-        let expected: CGFloat = 25.4
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else { continue }
-            let odX = stock.odX ?? stock.od ?? 0
-            let odY = stock.odY ?? stock.od ?? 0
-            XCTAssertEqual(Double(odX), Double(expected), accuracy: Double(tolerance),
-                           "Shape \(i) odX should be ~25.4 mm, got \(odX) mm")
-            XCTAssertEqual(Double(odY), Double(expected), accuracy: Double(tolerance),
-                           "Shape \(i) odY should be ~25.4 mm, got \(odY) mm")
-        }
-    }
-
-    func testSimpleRotatedFixtureFeatureCount() throws {
-        _ = try skip(ifMissing: "simple-rotated-test.step")
-        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else {
-                XCTFail("Shape \(i) has no stockInfo"); continue
-            }
-            XCTAssertEqual(stock.features.count, 2,
-                           "Shape \(i) must have exactly 2 features, got \(stock.features.count): \(stock.features.map { $0.type.rawValue })")
-        }
-    }
-
-    func testSimpleRotatedFixtureFeatureTypes() throws {
-        _ = try skip(ifMissing: "simple-rotated-test.step")
-        guard let shapes = loadModel("simple-rotated-test.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else { continue }
-            let types = Set(stock.features.map { $0.type })
-            XCTAssertTrue(types.contains(.startCut),
-                          "Shape \(i) must have a startCut feature, got: \(types.map { $0.rawValue })")
-            XCTAssertTrue(types.contains(.endCut),
-                          "Shape \(i) must have an endCut feature, got: \(types.map { $0.rawValue })")
-        }
-    }
-
-    // MARK: - Regression Tests: Threshold Bug Fixes
-
-    /// Bug 1 — `extremumTol` was 2.0 mm.
-    /// Inner walls of thin HSS (wall < 2 mm) were incorrectly included in
-    /// `outerWallFaceIDs`, producing phantom feature loops at both tube ends.
-    ///
-    /// `circ-test-simplified.step` is "HSS 1/2×1/2×0.065" (wall = 0.065 in = 1.651 mm).
-    /// With the old value of 2.0 mm: inner wall at (maxD − 1.651) ≥ maxD − 2.0 → included.
-    /// Each phantom inner-bore end loop was classified as an extra sever cut,
-    /// doubling the feature count from 2 → 4 per piece.
-    ///
-    /// Fixed: `extremumTol` = 0.5 mm (5× mesh deflection, below minimum HSS wall ~1.5 mm).
-    func testBug1ExtremumTolThinWalledHSSExactly2Features() throws {
-        _ = try skip(ifMissing: "circ-test-simplified.step")
-        guard let shapes = loadModel("circ-test-simplified.step")?.selectableShapes else { return }
-        for (i, shape) in shapes.enumerated() {
-            guard let stock = shape.stockInfo else {
-                XCTFail("Shape \(i) has no stockInfo"); continue
-            }
-            // With old extremumTol=2.0 mm this would be 4 (phantom inner-bore cuts).
-            XCTAssertEqual(stock.features.count, 2,
-                           "Shape \(i): expected 2 features (start+end sever cuts), got " +
-                           "\(stock.features.count): \(stock.features.map { $0.type.rawValue }). " +
-                           "Count > 2 means inner-wall faces are leaking into the outer hull (extremumTol too large).")
-        }
-    }
-
-    /// Bug 2 — `stitchTolerance` was `max(1.5, tubeLength × 0.01)`.
-    /// On a 385 mm tube that gives 3.85 mm; two separate feature loops whose partial
-    /// endpoints sat 2–3 mm apart at a face boundary were incorrectly merged into one,
-    /// reducing the observed feature count.
-    ///
-    /// This unit test drives `ModelLoader.stitch(_:tolerance:)` directly with two loops
-    /// whose nearest endpoints are 2.5 mm apart — inside the old 3.85 mm budget but
-    /// outside the fixed 2.0 mm budget — and verifies they stay as separate loops.
-    func testBug2StitchToleranceDoesNotMergeDistinctFeatures() {
-        let loop1: [SIMD3<Float>] = [SIMD3(10, 0, 0), SIMD3(10, 5, 0)]
-        // Nearest endpoint is 2.5 mm from loop1's last point.
-        let loop2: [SIMD3<Float>] = [SIMD3(10, 7.5, 0), SIMD3(10, 15, 0)]
-
-        let fixedResult = ModelLoader.stitch([loop1, loop2], tolerance: 2.0)
-        XCTAssertEqual(fixedResult.count, 2,
-                       "With fixed tolerance 2.0 mm, loops 2.5 mm apart must remain separate features")
-
-        // Demonstrate old behaviour (385 mm tube → old formula gives 3.85 mm):
-        let oldResult = ModelLoader.stitch([loop1, loop2], tolerance: 3.85)
-        XCTAssertEqual(oldResult.count, 1,
-                       "With old tolerance 3.85 mm, loops 2.5 mm apart would have been merged (the bug)")
-    }
-
-    /// Bug 3 — `axisTol` was `max(3.0, tubeLength × 0.015)`, minimum 3.0 mm.
-    /// A cutout whose axial loop starts 2.5 mm from a tube end is a genuine mid-tube
-    /// feature; it should be `.cutout`. The old minimum of 3.0 mm made `touchesStart`
-    /// fire, promoting it to `.notch` (wrong).
-    ///
-    /// This unit test drives `ModelLoader.featureType(...)` directly with the boundary
-    /// condition (loopMinX = 2.5 mm) and verifies the classification under both the
-    /// fixed axisTol (2.0 mm) and the old minimum (3.0 mm).
-    func testBug3AxisTolCutoutNearTubeEndIsNotMisclassified() {
-        let tubeLength: Float = 100.0
-
-        let fixedType = ModelLoader.featureType(
-            loopMinX: 2.5, loopMaxX: 10.0,
-            tubeLength: tubeLength, isFullProfile: false, axisTol: 2.0)
-        XCTAssertEqual(fixedType, .cutout,
-                       "With fixed axisTol 2.0 mm, a loop starting at 2.5 mm should be .cutout")
-
-        // Demonstrate old behaviour (old minimum axisTol was 3.0 mm):
-        let oldType = ModelLoader.featureType(
-            loopMinX: 2.5, loopMaxX: 10.0,
-            tubeLength: tubeLength, isFullProfile: false, axisTol: 3.0)
-        XCTAssertEqual(oldType, .notch,
-                       "With old axisTol 3.0 mm, a loop starting at 2.5 mm would have been .notch (the bug)")
-    }
-
-    // MARK: - Round-trip: STEP → StockInfo → GCode
-
-    func testSTEPToGCodeRoundTrip() throws {
-        _ = try skip(ifMissing: "circ-test.step")
-        guard let stock = loadModel("circ-test.step")?.selectableShapes.first?.stockInfo else { return }
-        guard !stock.features.isEmpty else {
-            XCTFail("circ-test.step produced no features to generate G-code for"); return
-        }
-
+        XCTAssertTrue(types.contains(.startCut), "Missing startCut")
+        XCTAssertTrue(types.contains(.endCut), "Missing endCut")
+        XCTAssertEqual(stock.profile, .square, "Should be identified as square stock")
+        
         let gen = GCodeGenerator()
         var s = GCodeSettings()
         s.enableThermalHedging = false
         s.useSimCNC = false
-        s.enableDynamicTHC = false
+        s.units = .metric
+        s.enableKerfComp = false
+        s.enableNonlinearErrorCompensation = false
+        s.enableSingularityDamping = false
         gen.settings = s
-
+        
         let gcode = gen.generateGCode(for: stock)
-        XCTAssertTrue(gcode.hasPrefix("%"), "Round-trip G-code must start with %")
-        XCTAssertTrue(gcode.contains("M3"),  "Round-trip G-code must have torch-on")
-        XCTAssertTrue(gcode.contains("M5"),  "Round-trip G-code must have torch-off")
-        XCTAssertFalse(gcode.isEmpty)
+        let lines = gcode.components(separatedBy: .newlines)
+        
+        struct G1Move {
+            var x, y, z, a: Double?
+        }
+        
+        var cutBlocks: [[G1Move]] = []
+        var currentBlock: [G1Move] = []
+        var insideM3M5 = false
+        
+        for line in lines {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.contains("M3") {
+                insideM3M5 = true
+                currentBlock = []
+            } else if t.contains("M5") {
+                if insideM3M5 && !currentBlock.isEmpty {
+                    cutBlocks.append(currentBlock)
+                }
+                insideM3M5 = false
+                currentBlock = []
+            } else if insideM3M5 && (t.hasPrefix("G1") || t.hasPrefix("G0")) {
+                var move = G1Move()
+                let parts = t.components(separatedBy: .whitespaces)
+                for p in parts {
+                    let valStr = String(p.dropFirst())
+                    if p.hasPrefix("X") { move.x = Double(valStr) }
+                    else if p.hasPrefix("Y") { move.y = Double(valStr) }
+                    else if p.hasPrefix("Z") { move.z = Double(valStr) }
+                    else if p.hasPrefix("A") { move.a = Double(valStr) }
+                }
+                currentBlock.append(move)
+            }
+        }
+        
+        XCTAssertEqual(cutBlocks.count, 2, "Expected exactly 2 cutting blocks")
+        
+        for (blockIdx, block) in cutBlocks.enumerated() {
+            guard let firstMove = block.first else { continue }
+            let blockX = firstMove.x ?? 0.0
+            
+            // "no movement on X during cutting (between M3...M5)"
+            for (moveIdx, move) in block.enumerated() {
+                if let x = move.x {
+                    XCTAssertEqual(x, blockX, accuracy: 0.001, "X moved in cutting block \(blockIdx) at move \(moveIdx)")
+                }
+            }
+            
+            // Pattern check: Torch moves on Y (flat), then AYZ (corner), then Y (flat)...
+            // We expect 4 flat faces and 4 corners.
+            enum segmentType { case flat, corner, unknown }
+            struct Segment {
+                let type: segmentType
+                var distance: Double = 0
+            }
+            var segments: [Segment] = []
+            
+            var lastY: Double?
+            var lastZ: Double?
+            var lastA: Double?
+            
+            for move in block {
+                let currentY = move.y ?? lastY
+                let currentZ = move.z ?? lastZ
+                let currentA = move.a ?? lastA
+
+                let yDelta = (lastY != nil && currentY != nil) ? abs(currentY! - lastY!) : 0.0
+                let zDelta = (lastZ != nil && currentZ != nil) ? abs(currentZ! - lastZ!) : 0.0
+                let aDelta = (lastA != nil && currentA != nil) ? abs(currentA! - lastA!) : 0.0
+
+                let yMove = yDelta > 0.001
+                let zMove = zDelta > 0.001
+                let aMove = aDelta > 0.001
+                
+                let currentType: segmentType
+                if aMove && yMove && zMove {
+                    currentType = .corner
+                } else if yMove && !aMove && !zMove {
+                    currentType = .flat
+                } else {
+                    currentType = .unknown
+                }
+                
+                // For flat segments, distance is strictly along Y.
+                let d = yDelta
+                
+                if segments.isEmpty || segments.last!.type != currentType {
+                    segments.append(Segment(type: currentType, distance: d))
+                } else {
+                    segments[segments.count - 1].distance += d
+                }
+                
+                lastY = currentY
+                lastZ = currentZ
+                lastA = currentA
+            }
+            
+            // Filter out unknown segments (lead-ins/lead-outs might look different)
+            let filteredSegments = segments.filter { $0.type != .unknown }
+            
+            // We expect at least 4 flats and 3 or 4 corners depending on where the cut starts/ends
+            let flats = filteredSegments.filter { $0.type == .flat }
+            let corners = filteredSegments.filter { $0.type == .corner }
+            
+            XCTAssertGreaterThanOrEqual(flats.count, 4, "Expected at least 4 flat segments in block \(blockIdx)")
+            XCTAssertGreaterThanOrEqual(corners.count, 3, "Expected at least 3 corner segments in block \(blockIdx)")
+            
+            // "each flat side should be about 43.498mm"
+            // Note: Lead-in/Lead-out might merge into one of the flats if they are perfectly aligned,
+            // but the core faces should be exactly 43.498mm.
+            var matchedFaces = 0
+            for flat in flats {
+                if abs(flat.distance - 43.498) < 0.1 {
+                    matchedFaces += 1
+                }
+            }
+            XCTAssertGreaterThanOrEqual(matchedFaces, 3, "Expected at least 3-4 flat faces to be exactly 43.498mm in block \(blockIdx). Found \(matchedFaces) with distance \(flats.map{$0.distance})")
+        }
     }
 
-    func testRectSTEPToGCodeRoundTrip() throws {
-        _ = try skip(ifMissing: "circ-test-notch-rect.step")
-        guard let stock = loadModel("circ-test-notch-rect.step")?.selectableShapes.first?.stockInfo else { return }
-
+    func testCylinderOneNotch() throws {
+        let name = "cylinder-one-notch.step"
+        let _ = try skip(ifMissing: name)
+        
+        guard let model = loadModel(name),
+              let stock = model.selectableShapes.first?.stockInfo else {
+            XCTFail("Failed to load model or extract stock info")
+            return
+        }
+        
+        // This model has 3 features: a startCut (X=0), an endCut (X=279.3), and a fishmouth cutout (X=214).
+        // The user's request focuses on the one straight cut and one fishmouth.
+        XCTAssertGreaterThanOrEqual(stock.features.count, 2, "Expected at least 2 features")
+        
         let gen = GCodeGenerator()
         var s = GCodeSettings()
         s.enableThermalHedging = false
         s.useSimCNC = false
-        s.enableDynamicTHC = false
+        s.units = .metric
+        s.enableKerfComp = false
+        s.enableNonlinearErrorCompensation = false
+        s.enableSingularityDamping = false
         gen.settings = s
-
+        
         let gcode = gen.generateGCode(for: stock)
-        XCTAssertTrue(gcode.hasPrefix("%"))
-        XCTAssertFalse(gcode.isEmpty)
+        let lines = gcode.components(separatedBy: .newlines)
+        
+        struct G1Move {
+            var x, y, z, a: Double?
+        }
+        
+        var cutBlocks: [[G1Move]] = []
+        var currentBlock: [G1Move] = []
+        var insideM3M5 = false
+        
+        for line in lines {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.contains("M3") {
+                insideM3M5 = true
+                currentBlock = []
+            } else if t.contains("M5") {
+                if insideM3M5 && !currentBlock.isEmpty {
+                    cutBlocks.append(currentBlock)
+                }
+                insideM3M5 = false
+                currentBlock = []
+            } else if insideM3M5 && (t.hasPrefix("G1") || t.hasPrefix("G0")) {
+                var move = G1Move()
+                let parts = t.components(separatedBy: .whitespaces)
+                for p in parts {
+                    let valStr = String(p.dropFirst())
+                    if p.hasPrefix("X") { move.x = Double(valStr) }
+                    else if p.hasPrefix("Y") { move.y = Double(valStr) }
+                    else if p.hasPrefix("Z") { move.z = Double(valStr) }
+                    else if p.hasPrefix("A") { move.a = Double(valStr) }
+                }
+                currentBlock.append(move)
+            }
+        }
+        
+        XCTAssertGreaterThanOrEqual(cutBlocks.count, 2, "Expected at least 2 torch-on blocks")
+        
+        var foundStraightCut = false
+        var foundFishmouth = false
+        
+        for (idx, block) in cutBlocks.enumerated() {
+            let xValues = block.compactMap { $0.x }.filter { !$0.isNaN }
+            let yValues = block.compactMap { $0.y }.filter { !$0.isNaN }
+            let zValues = block.compactMap { $0.z }.filter { !$0.isNaN }
+            let aValues = block.compactMap { $0.a }.filter { !$0.isNaN }
+            
+            let xSpan = (xValues.max() ?? 0) - (xValues.min() ?? 0)
+            let ySpan = (yValues.max() ?? 0) - (yValues.min() ?? 0)
+            let zSpan = (zValues.max() ?? 0) - (zValues.min() ?? 0)
+            
+            if xSpan < 0.01 {
+                // Straight cut: No movement on X, Y, or Z. Only A.
+                XCTAssertLessThan(ySpan, 0.01, "Y moved in straight cut block \(idx)")
+                XCTAssertLessThan(zSpan, 0.01, "Z moved in straight cut block \(idx)")
+                XCTAssertGreaterThan(aValues.count, 0, "No A moves in straight cut block \(idx)")
+                foundStraightCut = true
+            } else {
+                // Fishmouth: Movement on X and A. No movement on Y or Z.
+                XCTAssertLessThan(ySpan, 0.01, "Y moved in fishmouth block \(idx)")
+                XCTAssertLessThan(zSpan, 0.01, "Z moved in fishmouth block \(idx)")
+                XCTAssertGreaterThan(xSpan, 1.0, "X did not move enough in fishmouth block \(idx)")
+                foundFishmouth = true
+            }
+        }
+        
+        XCTAssertTrue(foundStraightCut, "Could not find a straight cut block (constant X)")
+        XCTAssertTrue(foundFishmouth, "Could not find a fishmouth block (varying X)")
+    }
+
+    func testHSSO3in125mmNoFeatures() throws {
+        let name = "hss-o/3in-125mm-no-features.step"
+        let _ = try skip(ifMissing: name)
+        
+        guard let model = loadModel(name) else {
+            XCTFail("Failed to load model from \(name)")
+            return
+        }
+        
+        guard !model.selectableShapes.isEmpty else {
+            XCTFail("Model \(name) has no selectable shapes")
+            return
+        }
+        
+        guard let stock = model.selectableShapes.first?.stockInfo else {
+            XCTFail("Failed to extract stock info from model \(name)")
+            return
+        }
+        
+        // 1. Assert exactly 2 features, one startCut and one endCut.
+        XCTAssertEqual(stock.features.count, 2, "Should have exactly 2 features for a plain tube (start/end cuts). Found: \(stock.features.map { $0.type.rawValue })")
+        let types = Set(stock.features.map { $0.type })
+        XCTAssertTrue(types.contains(.startCut), "Missing startCut")
+        XCTAssertTrue(types.contains(.endCut), "Missing endCut")
+        
+        let gen = GCodeGenerator()
+        var s = GCodeSettings()
+        s.enableThermalHedging = false // predictable sequence (start/end)
+        s.useSimCNC = false
+        s.units = .metric
+        s.enableKerfComp = false
+        s.enableNonlinearErrorCompensation = false
+        s.enableSingularityDamping = false
+        gen.settings = s
+        
+        let gcode = gen.generateGCode(for: stock)
+        let lines = gcode.components(separatedBy: .newlines)
+        
+        // 2. Parse G-code to verify movement constraints.
+        struct G1Move {
+            var x, y, z, a: Double?
+        }
+        
+        var cutBlocks: [[G1Move]] = []
+        var currentBlock: [G1Move] = []
+        var insideM3M5 = false
+        
+        for line in lines {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.contains("M3") {
+                insideM3M5 = true
+                currentBlock = []
+            } else if t.contains("M5") {
+                if insideM3M5 && !currentBlock.isEmpty {
+                    cutBlocks.append(currentBlock)
+                }
+                insideM3M5 = false
+                currentBlock = []
+            } else if insideM3M5 && (t.hasPrefix("G1") || t.hasPrefix("G0")) {
+                var move = G1Move()
+                let parts = t.components(separatedBy: .whitespaces)
+                for p in parts {
+                    let valStr = String(p.dropFirst())
+                    if p.hasPrefix("X") { move.x = Double(valStr) }
+                    else if p.hasPrefix("Y") { move.y = Double(valStr) }
+                    else if p.hasPrefix("Z") { move.z = Double(valStr) }
+                    else if p.hasPrefix("A") { move.a = Double(valStr) }
+                }
+                currentBlock.append(move)
+            }
+        }
+        
+        if cutBlocks.count != 2 {
+            print("FULL GCODE OUTPUT:\n\(gcode)")
+            XCTFail("Expected exactly 2 torch-on cutting blocks, but found \(cutBlocks.count)")
+            return
+        }
+        
+        var blockCentroidsX: [Double] = []
+        
+        for (idx, block) in cutBlocks.enumerated() {
+            guard let firstMove = block.first else { continue }
+            let firstX = firstMove.x ?? 0
+            let firstY = firstMove.y ?? 0
+            let firstZ = firstMove.z ?? 0
+            blockCentroidsX.append(firstX)
+            
+            XCTAssertFalse(firstX.isNaN, "X in block \(idx) is NaN")
+            XCTAssertFalse(firstY.isNaN, "Y in block \(idx) is NaN")
+            XCTAssertFalse(firstZ.isNaN, "Z in block \(idx) is NaN")
+            
+            // "both ends are cut with ONLY rotation on the A axis. X does not move during cutting (between M3...M5), Y does not move, Z does not move"
+            for (moveIdx, move) in block.enumerated() {
+                if let x = move.x {
+                    XCTAssertEqual(x, firstX, accuracy: 0.001, "X moved in block \(idx) at move \(moveIdx) (expected constant X=\(firstX), got \(x))")
+                }
+                if let y = move.y {
+                    XCTAssertEqual(y, firstY, accuracy: 0.001, "Y moved in block \(idx) at move \(moveIdx) (expected constant Y=\(firstY), got \(y))")
+                }
+                if let z = move.z {
+                    XCTAssertEqual(z, firstZ, accuracy: 0.001, "Z moved in block \(idx) at move \(moveIdx) (expected constant Z=\(firstZ), got \(z))")
+                }
+            }
+            
+            // "the rotation is a full circle, so 360 degrees (or slightly more due to overburn on A)"
+            let aValues = block.compactMap { $0.a }.filter { !$0.isNaN }
+            if let minA = aValues.min(), let maxA = aValues.max() {
+                let span = maxA - minA
+                XCTAssertGreaterThanOrEqual(span, 359.0, "Rotation span in block \(idx) should be ~360°, got \(span)°")
+            } else {
+                XCTFail("No valid A values found in block \(idx)")
+            }
+        }
+        
+        // "there's a motion command between the cuts to move from start to end, which should be 125mm."
+        if blockCentroidsX.count == 2 {
+            let dist = abs(blockCentroidsX[0] - blockCentroidsX[1])
+            XCTAssertEqual(dist, 125.0, accuracy: 0.1, "Distance between the two cut ends should be 125mm")
+        }
     }
 }

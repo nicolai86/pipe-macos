@@ -652,7 +652,7 @@ class GCodeGenerator {
                 if finalPath.last!.a > finalPath.first!.a {
                     finalPath.reverse()
                 }
-                isScrapLeft = true
+                isScrapLeft = false
             }
         }
 
@@ -698,7 +698,20 @@ class GCodeGenerator {
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
         var leadInPoints: [ToolpathPoint] = []
 
-        if leadTheta > 0.01 && leadR > 0.01 {
+        if (feature.type == .startCut || feature.type == .endCut) {
+            // SOTA: Purely rotational lead-in for sever cuts.
+            // WHY: Sever cuts are usually zero-waste or perfectly aligned with the tube end.
+            // Moving in X during lead-in would waste stock or deviate from the desired cut line.
+            let leadAngleDeg = (leadL + leadR) / k
+            let entryA = p0.a - sideMultiplier * leadAngleDeg
+            
+            // Generate a simple rotational "arc" (just more points along A)
+            let steps = 5
+            for i in 0...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                leadInPoints.append(ToolpathPoint(x: p0.x, a: entryA + sideMultiplier * leadAngleDeg * t))
+            }
+        } else if leadTheta > 0.01 && leadR > 0.01 {
             let Cx = p0.x + leadR * cos(gamma + sideMultiplier * .pi / 2.0)
             let Cy =
                 (p0.a * k) + leadR * sin(gamma + sideMultiplier * .pi / 2.0)
@@ -717,16 +730,25 @@ class GCodeGenerator {
                     )
                 )
             }
+            let firstArcPt = leadInPoints.first ?? p0
+            let entryTangent = gamma - sideMultiplier * leadTheta
+            leadInPoints.insert(
+                ToolpathPoint(
+                    x: firstArcPt.x - leadL * cos(entryTangent),
+                    a: ((firstArcPt.a * k) - leadL * sin(entryTangent)) / k
+                ),
+                at: 0
+            )
+        } else {
+            // Fallback for no arc lead-in
+            let entryTangent = gamma
+            leadInPoints.append(
+                ToolpathPoint(
+                    x: p0.x - leadL * cos(entryTangent),
+                    a: ((p0.a * k) - leadL * sin(entryTangent)) / k
+                )
+            )
         }
-        let firstArcPt = leadInPoints.first ?? p0
-        let entryTangent = gamma - sideMultiplier * leadTheta
-        leadInPoints.insert(
-            ToolpathPoint(
-                x: firstArcPt.x - leadL * cos(entryTangent),
-                a: ((firstArcPt.a * k) - leadL * sin(entryTangent)) / k
-            ),
-            at: 0
-        )
         finalPath.insert(contentsOf: leadInPoints, at: 0)
 
         func getWrappedMachinePoint(pt: ToolpathPoint, refAm: CGFloat?)
@@ -788,9 +810,8 @@ class GCodeGenerator {
                         lambda = 0.0  // No damping on flat surfaces
                     }
 
-                    let dampingRatio =
-                        (ds_cartesian * ds_cartesian)
-                        / ((ds_cartesian * ds_cartesian) + pow(lambda, 2))
+                    let denominator = (ds_cartesian * ds_cartesian) + pow(lambda, 2)
+                    let dampingRatio = denominator > 1e-9 ? (ds_cartesian * ds_cartesian) / denominator : 1.0
                     let newAm = prevDamped.Am + (target_dA * dampingRatio)
 
                     let thetaRad = newAm * .pi / 180.0
@@ -1120,7 +1141,7 @@ class GCodeGenerator {
         } else {
             let W = stock.odX ?? stock.od ?? 50.0
             let H = stock.odY ?? stock.od ?? 50.0
-            let R = min(W, H) * 0.1
+            let R = stock.cornerRadius ?? (min(W, H) * 0.1)
             let w = W - 2 * R
             let h = H - 2 * R
             let rad = angleDeg * .pi / 180.0

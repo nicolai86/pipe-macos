@@ -52,6 +52,7 @@ class StockInfo: Codable {
     var od: CGFloat?
     var odX: CGFloat?
     var odY: CGFloat?
+    var cornerRadius: CGFloat?
     var length: CGFloat
     var axis: SIMD3<Float>
     /// Cross-section "up" axis — one of the face normal directions perpendicular to axis.
@@ -257,6 +258,7 @@ class ModelLoader {
         // rectangular stock with fillets. A round tube will have at least one cylinder
         // with >180° span, while a fillet never exceeds 90°.
         var maxCylAngularSpan: Float = 0
+        var filletRadii: [Float] = []
         for f in facesData {
             guard let type = f["surface_type"] as? String, type == "CYLINDER",
                   let cd = f["cylinder"] as? [String: Any] else { continue }
@@ -286,8 +288,14 @@ class ModelLoader {
                 maxCylAngularSpan = span
                 tubeAxis = dot(axis, tubeAxis) >= 0 ? axis : -axis
             }
+            
+            // Fillet identification: subtends ~90 degrees (between 45 and 135)
+            if span < 0.75 * .pi && span > 0.25 * .pi {
+                filletRadii.append(getFloat(cd, "radius"))
+            }
         }
         tubeAxis = normalize(tubeAxis)
+        let cornerRadius = filletRadii.isEmpty ? nil : filletRadii.reduce(0, +) / Float(filletRadii.count)
 
         // --- Step 5: Determine cross-section axes (uAxis / vAxis) ---
         let sideWallCandidates = normalClusters.filter { abs(dot($0.dir, tubeAxis)) < 0.2 }
@@ -354,7 +362,12 @@ class ModelLoader {
             uAxis: uAxis,
             origin: trueCenter
         )
-        if isRectangular { stockInfo.uAxisDimension = CGFloat(trueWidth) }
+        if isRectangular { 
+            stockInfo.uAxisDimension = CGFloat(trueWidth)
+            if let cr = cornerRadius {
+                stockInfo.cornerRadius = CGFloat(cr)
+            }
+        }
 
         extractFeaturesFromTopology(
             facesData: facesData, renderVerts: renderVerts, tubeAxis: tubeAxis, uAxis: uAxis, vAxis: vAxis,
