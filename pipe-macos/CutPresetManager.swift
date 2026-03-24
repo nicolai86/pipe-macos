@@ -9,6 +9,7 @@ struct CutPreset: Codable, Identifiable, Equatable {
     var source: String      // e.g. "HT Sync 85 Air", "HT Powermax Imperial", "Custom"
     var amperage: Double    // A
     var feedRate: Double    // mm/min
+    var thickness: Double   // mm
     var kerfWidth: Double   // mm
     var cutHeight: Double   // mm
     var pierceHeight: Double // mm
@@ -47,6 +48,12 @@ struct AdvancedSettings: Codable {
     var maxAccelY: Double = 500.0
     var maxAccelZ: Double = 300.0
     var maxAccelA: Double = 1000.0
+
+    // Per-Axis Jerk Limits (baseline for 1/4" / 6.35mm stock)
+    var maxJerkX: Double = 1000.0
+    var maxJerkY: Double = 5000.0 // Hardcoded torch-only Y/Z
+    var maxJerkZ: Double = 2000.0
+    var maxJerkA: Double = 5000.0
 }
 
 // MARK: - Preset Manager
@@ -73,11 +80,21 @@ class CutPresetManager: ObservableObject {
 
     func currentGCodeSettings() -> GCodeSettings {
         var s = GCodeSettings()
+        var thicknessScale: CGFloat = 1.0
+        
         if let p = activePreset {
             s.feedRate     = CGFloat(p.feedRate)
             s.kerfWidth    = CGFloat(p.kerfWidth)
             s.cutHeight    = CGFloat(p.cutHeight)
             s.pierceHeight = CGFloat(p.pierceHeight)
+            
+            // Scaled jerk based on thickness vs 1/4" (6.35mm) reference stick.
+            // Thicker material = heavier stick = lower jerk to prevent vibration.
+            // We assume linear scaling of mass with thickness for HSS sections.
+            let refThickness: Double = 6.35
+            if p.thickness > 0.1 {
+                thicknessScale = CGFloat(refThickness / p.thickness)
+            }
         }
         s.rapidRate           = CGFloat(advancedSettings.rapidRate)
         s.safeHeight          = CGFloat(advancedSettings.safeHeight)
@@ -96,6 +113,13 @@ class CutPresetManager: ObservableObject {
         s.maxAccelY           = CGFloat(advancedSettings.maxAccelY)
         s.maxAccelZ           = CGFloat(advancedSettings.maxAccelZ)
         s.maxAccelA           = CGFloat(advancedSettings.maxAccelA)
+        
+        // Apply scaled jerk limits
+        s.maxJerkX            = CGFloat(advancedSettings.maxJerkX) * thicknessScale
+        s.maxJerkY            = CGFloat(advancedSettings.maxJerkY) // Y/Z carry torch only
+        s.maxJerkZ            = CGFloat(advancedSettings.maxJerkZ)
+        s.maxJerkA            = CGFloat(advancedSettings.maxJerkA) * thicknessScale
+        
         return s
     }
 
@@ -193,176 +217,176 @@ class CutPresetManager: ObservableObject {
     // MARK: - Built-in Hypertherm Seed Data
 
     // Metric helper: feed mm/min, heights mm
-    private static func m(_ name: String, _ amp: Double, _ feed: Double,
+    private static func m(_ name: String, _ amp: Double, _ feed: Double, _ thickness: Double,
                           _ pierceH: Double, _ cutH: Double, _ kerf: Double) -> CutPreset {
         CutPreset(name: name, source: "HT Sync 85 Air", amperage: amp,
-                  feedRate: feed, kerfWidth: kerf, cutHeight: cutH, pierceHeight: pierceH)
+                  feedRate: feed, thickness: thickness, kerfWidth: kerf, cutHeight: cutH, pierceHeight: pierceH)
     }
 
     // Imperial helper: feed in/min → mm/min, dimensions inches → mm
-    private static func imp(_ name: String, _ amp: Double, _ feedIpm: Double,
+    private static func imp(_ name: String, _ amp: Double, _ feedIpm: Double, _ thickness_in: Double,
                             _ pierceH_in: Double, _ cutH_in: Double, _ kerf_in: Double) -> CutPreset {
         let k = 25.4
         return CutPreset(name: name, source: "HT Powermax Imperial", amperage: amp,
-                         feedRate: feedIpm * k, kerfWidth: kerf_in * k,
+                         feedRate: feedIpm * k, thickness: thickness_in * k, kerfWidth: kerf_in * k,
                          cutHeight: cutH_in * k, pierceHeight: pierceH_in * k)
     }
 
     static let defaultPresets: [CutPreset] = [
         // ── HT Sync 85 Air ── Aluminum ────────────────────────────────────────
-        m("Aluminum 1mm",          45,  8260, 3.8, 3.2, 1.6),
-        m("Aluminum 2mm",          45,  5970, 3.8, 3.2, 1.8),
-        m("Aluminum 3mm",          45,  3350, 3.8, 3.2, 1.9),
-        m("Aluminum 4mm",          45,  2210, 3.8, 3.2, 1.9),
-        m("Aluminum 6mm",          45,  1240, 3.8, 3.2, 2.0),
-        m("Aluminum 2mm",          65,  9270, 3.8, 3.2, 1.4),
-        m("Aluminum 3mm",          65,  7540, 3.8, 3.2, 1.5),
-        m("Aluminum 4mm",          65,  5380, 3.8, 3.2, 1.5),
-        m("Aluminum 6mm",          65,  2900, 3.8, 3.2, 1.6),
-        m("Aluminum 8mm",          65,  1780, 3.8, 3.2, 1.7),
-        m("Aluminum 10mm",         65,  1220, 4.8, 3.2, 1.8),
-        m("Aluminum 12mm",         65,   940, 4.8, 3.2, 1.9),
-        m("Aluminum 3mm",          85,  7980, 3.8, 3.2, 1.9),
-        m("Aluminum 4mm",          85,  6050, 3.8, 3.2, 2.0),
-        m("Aluminum 6mm",          85,  3630, 3.8, 3.2, 2.2),
-        m("Aluminum 8mm",          85,  2440, 3.8, 3.2, 2.4),
-        m("Aluminum 10mm",         85,  1780, 4.8, 3.2, 2.5),
-        m("Aluminum 12mm",         85,  1400, 4.8, 3.2, 2.6),
-        m("Aluminum 16mm",         85,   940, 4.8, 3.2, 2.7),
+        m("Aluminum 1mm", 45,  8260, 1.00, 3.8, 3.2, 1.6),
+        m("Aluminum 2mm", 45,  5970, 2.00, 3.8, 3.2, 1.8),
+        m("Aluminum 3mm", 45,  3350, 3.00, 3.8, 3.2, 1.9),
+        m("Aluminum 4mm", 45,  2210, 4.00, 3.8, 3.2, 1.9),
+        m("Aluminum 6mm", 45,  1240, 6.00, 3.8, 3.2, 2.0),
+        m("Aluminum 2mm", 65,  9270, 2.00, 3.8, 3.2, 1.4),
+        m("Aluminum 3mm", 65,  7540, 3.00, 3.8, 3.2, 1.5),
+        m("Aluminum 4mm", 65,  5380, 4.00, 3.8, 3.2, 1.5),
+        m("Aluminum 6mm", 65,  2900, 6.00, 3.8, 3.2, 1.6),
+        m("Aluminum 8mm", 65,  1780, 8.00, 3.8, 3.2, 1.7),
+        m("Aluminum 10mm", 65,  1220, 10.00, 4.8, 3.2, 1.8),
+        m("Aluminum 12mm", 65,   940, 12.00, 4.8, 3.2, 1.9),
+        m("Aluminum 3mm", 85,  7980, 3.00, 3.8, 3.2, 1.9),
+        m("Aluminum 4mm", 85,  6050, 4.00, 3.8, 3.2, 2.0),
+        m("Aluminum 6mm", 85,  3630, 6.00, 3.8, 3.2, 2.2),
+        m("Aluminum 8mm", 85,  2440, 8.00, 3.8, 3.2, 2.4),
+        m("Aluminum 10mm", 85,  1780, 10.00, 4.8, 3.2, 2.5),
+        m("Aluminum 12mm", 85,  1400, 12.00, 4.8, 3.2, 2.6),
+        m("Aluminum 16mm", 85,   940, 16.00, 4.8, 3.2, 2.7),
         // ── Stainless Steel ───────────────────────────────────────────────────
-        m("Stainless Steel 0.5mm", 45,  8890, 3.8, 3.2, 1.1),
-        m("Stainless Steel 1mm",   45,  8890, 3.8, 3.2, 0.8),
-        m("Stainless Steel 1.5mm", 45,  8890, 3.8, 3.2, 0.7),
-        m("Stainless Steel 2mm",   45,  6220, 3.8, 3.2, 0.8),
-        m("Stainless Steel 3mm",   45,  3230, 3.8, 3.2, 1.4),
-        m("Stainless Steel 4mm",   45,  1960, 3.8, 3.2, 2.2),
-        m("Stainless Steel 6mm",   45,   860, 3.8, 3.2, 2.4),
-        m("Stainless Steel 2mm",   65,  8760, 3.8, 3.2, 0.8),
-        m("Stainless Steel 3mm",   65,  7650, 3.8, 3.2, 1.1),
-        m("Stainless Steel 4mm",   65,  5160, 3.8, 3.2, 1.3),
-        m("Stainless Steel 6mm",   65,  2440, 3.8, 3.2, 1.6),
-        m("Stainless Steel 8mm",   65,  1350, 3.8, 3.2, 1.8),
-        m("Stainless Steel 10mm",  65,   940, 4.8, 3.2, 2.0),
-        m("Stainless Steel 12mm",  65,   740, 4.8, 3.2, 2.1),
-        m("Stainless Steel 3mm",   85,  8100, 3.8, 3.2, 1.3),
-        m("Stainless Steel 4mm",   85,  6220, 3.8, 3.2, 1.6),
-        m("Stainless Steel 6mm",   85,  3630, 3.8, 3.2, 2.0),
-        m("Stainless Steel 8mm",   85,  2260, 3.8, 3.2, 2.3),
-        m("Stainless Steel 10mm",  85,  1500, 4.8, 3.2, 2.4),
-        m("Stainless Steel 12mm",  85,  1040, 4.8, 3.2, 2.5),
-        m("Stainless Steel 16mm",  85,   690, 4.8, 3.2, 2.5),
+        m("Stainless Steel 0.5mm", 45,  8890, 0.50, 3.8, 3.2, 1.1),
+        m("Stainless Steel 1mm", 45,  8890, 1.00, 3.8, 3.2, 0.8),
+        m("Stainless Steel 1.5mm", 45,  8890, 1.50, 3.8, 3.2, 0.7),
+        m("Stainless Steel 2mm", 45,  6220, 2.00, 3.8, 3.2, 0.8),
+        m("Stainless Steel 3mm", 45,  3230, 3.00, 3.8, 3.2, 1.4),
+        m("Stainless Steel 4mm", 45,  1960, 4.00, 3.8, 3.2, 2.2),
+        m("Stainless Steel 6mm", 45,   860, 6.00, 3.8, 3.2, 2.4),
+        m("Stainless Steel 2mm", 65,  8760, 2.00, 3.8, 3.2, 0.8),
+        m("Stainless Steel 3mm", 65,  7650, 3.00, 3.8, 3.2, 1.1),
+        m("Stainless Steel 4mm", 65,  5160, 4.00, 3.8, 3.2, 1.3),
+        m("Stainless Steel 6mm", 65,  2440, 6.00, 3.8, 3.2, 1.6),
+        m("Stainless Steel 8mm", 65,  1350, 8.00, 3.8, 3.2, 1.8),
+        m("Stainless Steel 10mm", 65,   940, 10.00, 4.8, 3.2, 2.0),
+        m("Stainless Steel 12mm", 65,   740, 12.00, 4.8, 3.2, 2.1),
+        m("Stainless Steel 3mm", 85,  8100, 3.00, 3.8, 3.2, 1.3),
+        m("Stainless Steel 4mm", 85,  6220, 4.00, 3.8, 3.2, 1.6),
+        m("Stainless Steel 6mm", 85,  3630, 6.00, 3.8, 3.2, 2.0),
+        m("Stainless Steel 8mm", 85,  2260, 8.00, 3.8, 3.2, 2.3),
+        m("Stainless Steel 10mm", 85,  1500, 10.00, 4.8, 3.2, 2.4),
+        m("Stainless Steel 12mm", 85,  1040, 12.00, 4.8, 3.2, 2.5),
+        m("Stainless Steel 16mm", 85,   690, 16.00, 4.8, 3.2, 2.5),
         // ── Carbon Steel ──────────────────────────────────────────────────────
-        m("Carbon Steel 0.5mm",    45,  8890, 3.8, 3.2, 1.1),
-        m("Carbon Steel 1mm",      45,  8890, 3.8, 3.2, 1.4),
-        m("Carbon Steel 1.5mm",    45,  8890, 3.8, 3.2, 1.5),
-        m("Carbon Steel 2mm",      45,  6600, 3.8, 3.2, 1.7),
-        m("Carbon Steel 3mm",      45,  3630, 3.8, 3.2, 1.8),
-        m("Carbon Steel 4mm",      45,  2260, 3.8, 3.2, 1.9),
-        m("Carbon Steel 6mm",      45,  1240, 3.8, 3.2, 1.9),
-        m("Carbon Steel 3mm",      65,  5330, 3.8, 3.2, 1.3),
-        m("Carbon Steel 4mm",      65,  4220, 3.8, 3.2, 1.4),
-        m("Carbon Steel 6mm",      65,  2570, 3.8, 3.2, 1.5),
-        m("Carbon Steel 8mm",      65,  1550, 3.8, 3.2, 1.7),
-        m("Carbon Steel 10mm",     65,  1040, 3.8, 3.2, 1.9),
-        m("Carbon Steel 12mm",     65,   840, 3.8, 3.2, 2.0),
-        m("Carbon Steel 16mm",     65,   560, 6.4, 3.2, 2.3),
-        m("Carbon Steel 3mm",      85,  6930, 3.8, 3.2, 1.5),
-        m("Carbon Steel 4mm",      85,  5560, 3.8, 3.2, 1.7),
-        m("Carbon Steel 6mm",      85,  3560, 3.8, 3.2, 1.9),
-        m("Carbon Steel 8mm",      85,  2360, 3.8, 3.2, 2.1),
-        m("Carbon Steel 10mm",     85,  1630, 4.8, 3.2, 2.3),
-        m("Carbon Steel 12mm",     85,  1240, 4.8, 3.2, 2.4),
-        m("Carbon Steel 16mm",     85,   840, 4.8, 3.2, 2.6),
-        m("Carbon Steel 20mm",     85,   580, 6.4, 3.2, 2.8),
+        m("Carbon Steel 0.5mm", 45,  8890, 0.50, 3.8, 3.2, 1.1),
+        m("Carbon Steel 1mm", 45,  8890, 1.00, 3.8, 3.2, 1.4),
+        m("Carbon Steel 1.5mm", 45,  8890, 1.50, 3.8, 3.2, 1.5),
+        m("Carbon Steel 2mm", 45,  6600, 2.00, 3.8, 3.2, 1.7),
+        m("Carbon Steel 3mm", 45,  3630, 3.00, 3.8, 3.2, 1.8),
+        m("Carbon Steel 4mm", 45,  2260, 4.00, 3.8, 3.2, 1.9),
+        m("Carbon Steel 6mm", 45,  1240, 6.00, 3.8, 3.2, 1.9),
+        m("Carbon Steel 3mm", 65,  5330, 3.00, 3.8, 3.2, 1.3),
+        m("Carbon Steel 4mm", 65,  4220, 4.00, 3.8, 3.2, 1.4),
+        m("Carbon Steel 6mm", 65,  2570, 6.00, 3.8, 3.2, 1.5),
+        m("Carbon Steel 8mm", 65,  1550, 8.00, 3.8, 3.2, 1.7),
+        m("Carbon Steel 10mm", 65,  1040, 10.00, 3.8, 3.2, 1.9),
+        m("Carbon Steel 12mm", 65,   840, 12.00, 3.8, 3.2, 2.0),
+        m("Carbon Steel 16mm", 65,   560, 16.00, 6.4, 3.2, 2.3),
+        m("Carbon Steel 3mm", 85,  6930, 3.00, 3.8, 3.2, 1.5),
+        m("Carbon Steel 4mm", 85,  5560, 4.00, 3.8, 3.2, 1.7),
+        m("Carbon Steel 6mm", 85,  3560, 6.00, 3.8, 3.2, 1.9),
+        m("Carbon Steel 8mm", 85,  2360, 8.00, 3.8, 3.2, 2.1),
+        m("Carbon Steel 10mm", 85,  1630, 10.00, 4.8, 3.2, 2.3),
+        m("Carbon Steel 12mm", 85,  1240, 12.00, 4.8, 3.2, 2.4),
+        m("Carbon Steel 16mm", 85,   840, 16.00, 4.8, 3.2, 2.6),
+        m("Carbon Steel 20mm", 85,   580, 20.00, 6.4, 3.2, 2.8),
 
         // ── HT Powermax Imperial ── Mild Steel FineCut ────────────────────────
-        imp("Mild Steel 26 GA FineCut",  45, 350, 0.140, 0.140, 0.033),
-        imp("Mild Steel 24 GA FineCut",  45, 350, 0.140, 0.140, 0.032),
-        imp("Mild Steel 22 GA FineCut",  45, 350, 0.140, 0.140, 0.026),
-        imp("Mild Steel 20 GA FineCut",  45, 350, 0.140, 0.140, 0.024),
-        imp("Mild Steel 18 GA FineCut",  45, 250, 0.140, 0.140, 0.021),
-        imp("Mild Steel 16 GA FineCut",  45, 250, 0.140, 0.140, 0.021),
-        imp("Mild Steel 14 GA FineCut",  45, 220, 0.140, 0.140, 0.021),
-        imp("Mild Steel 12 GA FineCut",  45, 115, 0.140, 0.140, 0.032),
-        imp("Mild Steel 10 GA FineCut",  45, 100, 0.140, 0.140, 0.031),
+        imp("Mild Steel 26 GA FineCut", 45, 350, 0.0177, 0.140, 0.140, 0.033),
+        imp("Mild Steel 24 GA FineCut", 45, 350, 0.0236, 0.140, 0.140, 0.032),
+        imp("Mild Steel 22 GA FineCut", 45, 350, 0.0295, 0.140, 0.140, 0.026),
+        imp("Mild Steel 20 GA FineCut", 45, 350, 0.0354, 0.140, 0.140, 0.024),
+        imp("Mild Steel 18 GA FineCut", 45, 250, 0.0472, 0.140, 0.140, 0.021),
+        imp("Mild Steel 16 GA FineCut", 45, 250, 0.0591, 0.140, 0.140, 0.021),
+        imp("Mild Steel 14 GA FineCut", 45, 220, 0.0748, 0.140, 0.140, 0.021),
+        imp("Mild Steel 12 GA FineCut", 45, 115, 0.1024, 0.140, 0.140, 0.032),
+        imp("Mild Steel 10 GA FineCut", 45, 100, 0.1339, 0.140, 0.140, 0.031),
         // Mild Steel standard
-        imp("Mild Steel 10 GA",          45, 115, 0.150, 0.125, 0.073),
-        imp("Mild Steel 3/16 in",        45,  68, 0.150, 0.125, 0.074),
-        imp("Mild Steel 1/4 in",         45,  46, 0.150, 0.125, 0.075),
-        imp("Mild Steel 10 GA",          65, 186, 0.150, 0.125, 0.053),
-        imp("Mild Steel 3/16 in",        65, 138, 0.150, 0.125, 0.057),
-        imp("Mild Steel 1/4 in",         65,  93, 0.150, 0.125, 0.062),
-        imp("Mild Steel 3/8 in",         65,  44, 0.150, 0.125, 0.072),
-        imp("Mild Steel 1/2 in",         65,  30, 0.150, 0.125, 0.081),
-        imp("Mild Steel 5/8 in",         65,  22, 0.250, 0.125, 0.089),
-        imp("Mild Steel 3/4 in",         65,  16, 0.250, 0.125, 0.097),
-        imp("Mild Steel 10 GA",          85, 250, 0.150, 0.125, 0.063),
-        imp("Mild Steel 3/16 in",        85, 185, 0.150, 0.125, 0.070),
-        imp("Mild Steel 1/4 in",         85, 130, 0.125, 0.125, 0.077),
-        imp("Mild Steel 3/8 in",         85,  70, 0.188, 0.125, 0.088),
-        imp("Mild Steel 1/2 in",         85,  46, 0.150, 0.125, 0.096),
-        imp("Mild Steel 5/8 in",         85,  34, 0.200, 0.125, 0.103),
-        imp("Mild Steel 3/4 in",         85,  25, 0.250, 0.125, 0.108),
-        imp("Mild Steel 7/8 in",         85,  19, 0.200, 0.125, 0.114),
-        imp("Mild Steel 1 in",           85,  13, 0.250, 0.125, 0.120),
-        imp("Mild Steel 1-1/8 in",       85,   9, 0.200, 0.125, 0.128),
-        imp("Mild Steel 1-1/4 in",       85,   6, 0.250, 0.125, 0.139),
+        imp("Mild Steel 10 GA", 45, 115, 0.1339, 0.150, 0.125, 0.073),
+        imp("Mild Steel 3/16 in", 45,  68, 0.1875, 0.150, 0.125, 0.074),
+        imp("Mild Steel 1/4 in", 45,  46, 0.2500, 0.150, 0.125, 0.075),
+        imp("Mild Steel 10 GA", 65, 186, 0.1339, 0.150, 0.125, 0.053),
+        imp("Mild Steel 3/16 in", 65, 138, 0.1875, 0.150, 0.125, 0.057),
+        imp("Mild Steel 1/4 in", 65,  93, 0.2500, 0.150, 0.125, 0.062),
+        imp("Mild Steel 3/8 in", 65,  44, 0.3750, 0.150, 0.125, 0.072),
+        imp("Mild Steel 1/2 in", 65,  30, 0.5000, 0.150, 0.125, 0.081),
+        imp("Mild Steel 5/8 in", 65,  22, 0.6250, 0.250, 0.125, 0.089),
+        imp("Mild Steel 3/4 in", 65,  16, 0.7500, 0.250, 0.125, 0.097),
+        imp("Mild Steel 10 GA", 85, 250, 0.1339, 0.150, 0.125, 0.063),
+        imp("Mild Steel 3/16 in", 85, 185, 0.1875, 0.150, 0.125, 0.070),
+        imp("Mild Steel 1/4 in", 85, 130, 0.2500, 0.125, 0.125, 0.077),
+        imp("Mild Steel 3/8 in", 85,  70, 0.3750, 0.188, 0.125, 0.088),
+        imp("Mild Steel 1/2 in", 85,  46, 0.5000, 0.150, 0.125, 0.096),
+        imp("Mild Steel 5/8 in", 85,  34, 0.6250, 0.200, 0.125, 0.103),
+        imp("Mild Steel 3/4 in", 85,  25, 0.7500, 0.250, 0.125, 0.108),
+        imp("Mild Steel 7/8 in", 85,  19, 0.8750, 0.200, 0.125, 0.114),
+        imp("Mild Steel 1 in", 85,  13, 0.0394, 0.250, 0.125, 0.120),
+        imp("Mild Steel 1-1/8 in", 85,   9, 1.1250, 0.200, 0.125, 0.128),
+        imp("Mild Steel 1-1/4 in", 85,   6, 1.2500, 0.250, 0.125, 0.139),
         // Stainless Steel FineCut
-        imp("Stainless Steel 26 GA FineCut", 45, 350, 0.020, 0.140, 0.028),
-        imp("Stainless Steel 24 GA FineCut", 45, 350, 0.140, 0.140, 0.024),
-        imp("Stainless Steel 22 GA FineCut", 45, 350, 0.140, 0.140, 0.020),
-        imp("Stainless Steel 20 GA FineCut", 45, 350, 0.140, 0.140, 0.016),
-        imp("Stainless Steel 18 GA FineCut", 45, 240, 0.140, 0.140, 0.017),
-        imp("Stainless Steel 16 GA FineCut", 45, 240, 0.140, 0.140, 0.017),
-        imp("Stainless Steel 14 GA FineCut", 45,  50, 0.140, 0.140, 0.017),
-        imp("Stainless Steel 12 GA FineCut", 45, 120, 0.140, 0.140, 0.026),
-        imp("Stainless Steel 10 GA FineCut", 45,  75, 0.140, 0.140, 0.023),
+        imp("Stainless Steel 26 GA FineCut", 45, 350, 0.0177, 0.020, 0.140, 0.028),
+        imp("Stainless Steel 24 GA FineCut", 45, 350, 0.0236, 0.140, 0.140, 0.024),
+        imp("Stainless Steel 22 GA FineCut", 45, 350, 0.0295, 0.140, 0.140, 0.020),
+        imp("Stainless Steel 20 GA FineCut", 45, 350, 0.0354, 0.140, 0.140, 0.016),
+        imp("Stainless Steel 18 GA FineCut", 45, 240, 0.0472, 0.140, 0.140, 0.017),
+        imp("Stainless Steel 16 GA FineCut", 45, 240, 0.0591, 0.140, 0.140, 0.017),
+        imp("Stainless Steel 14 GA FineCut", 45,  50, 0.0748, 0.140, 0.140, 0.017),
+        imp("Stainless Steel 12 GA FineCut", 45, 120, 0.1024, 0.140, 0.140, 0.026),
+        imp("Stainless Steel 10 GA FineCut", 45,  75, 0.1339, 0.140, 0.140, 0.023),
         // Stainless Steel standard
-        imp("Stainless Steel 10 GA",     45,  94, 0.150, 0.150, 0.072),
-        imp("Stainless Steel 3/16 in",   45,  55, 0.150, 0.150, 0.102),
-        imp("Stainless Steel 1/4 in",    45,  30, 0.150, 0.150, 0.082),
-        imp("Stainless Steel 10 GA",     65, 241, 0.150, 0.150, 0.047),
-        imp("Stainless Steel 3/16 in",   65, 150, 0.150, 0.150, 0.055),
-        imp("Stainless Steel 1/4 in",    65,  86, 0.150, 0.150, 0.064),
-        imp("Stainless Steel 3/8 in",    65,  40, 0.188, 0.150, 0.075),
-        imp("Stainless Steel 1/2 in",    65,  27, 0.188, 0.150, 0.082),
-        imp("Stainless Steel 5/8 in",    65,  19, 0.188, 0.150, 0.087),
-        imp("Stainless Steel 3/4 in",    65,  14, 0.188, 0.150, 0.096),
-        imp("Stainless Steel 10 GA",     85, 275, 0.150, 0.150, 0.060),
-        imp("Stainless Steel 3/16 in",   85, 199, 0.150, 0.150, 0.071),
-        imp("Stainless Steel 1/4 in",    85, 131, 0.150, 0.150, 0.082),
-        imp("Stainless Steel 3/8 in",    85,  65, 0.188, 0.150, 0.094),
-        imp("Stainless Steel 1/2 in",    85,  36, 0.188, 0.150, 0.098),
-        imp("Stainless Steel 5/8 in",    85,  27, 1.000, 0.150, 0.098),
-        imp("Stainless Steel 3/4 in",    85,  21, 0.150, 0.150, 0.102),
-        imp("Stainless Steel 7/8 in",    85,  16, 0.150, 0.150, 0.114),
-        imp("Stainless Steel 1 in",      85,  11, 0.150, 0.150, 0.141),
+        imp("Stainless Steel 10 GA", 45,  94, 0.1339, 0.150, 0.150, 0.072),
+        imp("Stainless Steel 3/16 in", 45,  55, 0.1875, 0.150, 0.150, 0.102),
+        imp("Stainless Steel 1/4 in", 45,  30, 0.2500, 0.150, 0.150, 0.082),
+        imp("Stainless Steel 10 GA", 65, 241, 0.1339, 0.150, 0.150, 0.047),
+        imp("Stainless Steel 3/16 in", 65, 150, 0.1875, 0.150, 0.150, 0.055),
+        imp("Stainless Steel 1/4 in", 65,  86, 0.2500, 0.150, 0.150, 0.064),
+        imp("Stainless Steel 3/8 in", 65,  40, 0.3750, 0.188, 0.150, 0.075),
+        imp("Stainless Steel 1/2 in", 65,  27, 0.5000, 0.188, 0.150, 0.082),
+        imp("Stainless Steel 5/8 in", 65,  19, 0.6250, 0.188, 0.150, 0.087),
+        imp("Stainless Steel 3/4 in", 65,  14, 0.7500, 0.188, 0.150, 0.096),
+        imp("Stainless Steel 10 GA", 85, 275, 0.1339, 0.150, 0.150, 0.060),
+        imp("Stainless Steel 3/16 in", 85, 199, 0.1875, 0.150, 0.150, 0.071),
+        imp("Stainless Steel 1/4 in", 85, 131, 0.2500, 0.150, 0.150, 0.082),
+        imp("Stainless Steel 3/8 in", 85,  65, 0.3750, 0.188, 0.150, 0.094),
+        imp("Stainless Steel 1/2 in", 85,  36, 0.5000, 0.188, 0.150, 0.098),
+        imp("Stainless Steel 5/8 in", 85,  27, 0.6250, 1.000, 0.150, 0.098),
+        imp("Stainless Steel 3/4 in", 85,  21, 0.7500, 0.150, 0.150, 0.102),
+        imp("Stainless Steel 7/8 in", 85,  16, 0.8750, 0.150, 0.150, 0.114),
+        imp("Stainless Steel 1 in", 85,  11, 0.0394, 0.150, 0.150, 0.141),
         // Aluminum FineCut
-        imp("Aluminum 1/32 in FineCut",  45, 325, 0.140, 0.140, 0.062),
-        imp("Aluminum 1/16 in FineCut",  45, 325, 0.140, 0.140, 0.069),
-        imp("Aluminum 3/32 in FineCut",  45, 183, 0.140, 0.140, 0.073),
-        imp("Aluminum 1/8 in FineCut",   45, 121, 0.140, 0.140, 0.074),
-        imp("Aluminum 1/4 in FineCut",   45,  46, 0.140, 0.140, 0.081),
+        imp("Aluminum 1/32 in FineCut", 45, 325, 0.0312, 0.140, 0.140, 0.062),
+        imp("Aluminum 1/16 in FineCut", 45, 325, 0.0625, 0.140, 0.140, 0.069),
+        imp("Aluminum 3/32 in FineCut", 45, 183, 0.0938, 0.140, 0.140, 0.073),
+        imp("Aluminum 1/8 in FineCut", 45, 121, 0.1250, 0.140, 0.140, 0.074),
+        imp("Aluminum 1/4 in FineCut", 45,  46, 0.2500, 0.140, 0.140, 0.081),
         // Aluminum standard
-        imp("Aluminum 1/32 in",          45, 325, 0.150, 0.150, 0.062),
-        imp("Aluminum 1/16 in",          45, 325, 0.150, 0.150, 0.069),
-        imp("Aluminum 3/32 in",          45, 183, 0.150, 0.150, 0.073),
-        imp("Aluminum 1/8 in",           45, 121, 0.150, 0.150, 0.074),
-        imp("Aluminum 1/4 in",           45,  46, 0.150, 0.150, 0.081),
-        imp("Aluminum 1/16 in",          65, 365, 0.150, 0.150, 0.056),
-        imp("Aluminum 1/8 in",           65, 280, 0.150, 0.150, 0.059),
-        imp("Aluminum 1/4 in",           65, 104, 0.150, 0.150, 0.064),
-        imp("Aluminum 3/8 in",           65,  52, 0.188, 0.150, 0.069),
-        imp("Aluminum 1/2 in",           65,  34, 0.188, 0.150, 0.076),
-        imp("Aluminum 5/8 in",           65,  25, 0.188, 0.150, 0.083),
-        imp("Aluminum 3/4 in",           65,  17, 0.188, 0.150, 0.092),
-        imp("Aluminum 1/8 in",           85, 300, 0.150, 0.125, 0.076),
-        imp("Aluminum 1/4 in",           85, 133, 0.150, 0.125, 0.089),
-        imp("Aluminum 3/8 in",           85,  75, 0.150, 0.125, 0.097),
-        imp("Aluminum 1/2 in",           85,  51, 0.150, 0.125, 0.102),
-        imp("Aluminum 5/8 in",           85,  38, 0.150, 0.125, 0.106),
-        imp("Aluminum 3/4 in",           85,  26, 0.150, 0.125, 0.109),
-        imp("Aluminum 7/8 in",           85,  19, 0.150, 0.125, 0.113),
-        imp("Aluminum 1 in",             85,  15, 0.150, 0.125, 0.119),
+        imp("Aluminum 1/32 in", 45, 325, 0.0312, 0.150, 0.150, 0.062),
+        imp("Aluminum 1/16 in", 45, 325, 0.0625, 0.150, 0.150, 0.069),
+        imp("Aluminum 3/32 in", 45, 183, 0.0938, 0.150, 0.150, 0.073),
+        imp("Aluminum 1/8 in", 45, 121, 0.1250, 0.150, 0.150, 0.074),
+        imp("Aluminum 1/4 in", 45,  46, 0.2500, 0.150, 0.150, 0.081),
+        imp("Aluminum 1/16 in", 65, 365, 0.0625, 0.150, 0.150, 0.056),
+        imp("Aluminum 1/8 in", 65, 280, 0.1250, 0.150, 0.150, 0.059),
+        imp("Aluminum 1/4 in", 65, 104, 0.2500, 0.150, 0.150, 0.064),
+        imp("Aluminum 3/8 in", 65,  52, 0.3750, 0.188, 0.150, 0.069),
+        imp("Aluminum 1/2 in", 65,  34, 0.5000, 0.188, 0.150, 0.076),
+        imp("Aluminum 5/8 in", 65,  25, 0.6250, 0.188, 0.150, 0.083),
+        imp("Aluminum 3/4 in", 65,  17, 0.7500, 0.188, 0.150, 0.092),
+        imp("Aluminum 1/8 in", 85, 300, 0.1250, 0.150, 0.125, 0.076),
+        imp("Aluminum 1/4 in", 85, 133, 0.2500, 0.150, 0.125, 0.089),
+        imp("Aluminum 3/8 in", 85,  75, 0.3750, 0.150, 0.125, 0.097),
+        imp("Aluminum 1/2 in", 85,  51, 0.5000, 0.150, 0.125, 0.102),
+        imp("Aluminum 5/8 in", 85,  38, 0.6250, 0.150, 0.125, 0.106),
+        imp("Aluminum 3/4 in", 85,  26, 0.7500, 0.150, 0.125, 0.109),
+        imp("Aluminum 7/8 in", 85,  19, 0.8750, 0.150, 0.125, 0.113),
+        imp("Aluminum 1 in", 85,  15, 0.0394, 0.150, 0.125, 0.119),
     ]
 }

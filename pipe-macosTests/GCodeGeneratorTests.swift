@@ -540,6 +540,123 @@ final class GCodeGeneratorTests: XCTestCase {
                        "THC control codes must be absent when enableDynamicTHC = false")
     }
 
+    // MARK: - S-Curve Profiling Tests
+
+    func testSCurveVelocityProfileSmoothness() {
+        let length: CGFloat = 1000.0
+        let stock = makeRoundHSS(od: 50.8, length: length)
+        
+        // Make a long straight cut to see the ramps
+        let xStart: CGFloat = 100
+        let xEnd: CGFloat = 900
+        let steps = 100
+        var path: [ToolpathPoint] = []
+        for i in 0...steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            path.append(ToolpathPoint(x: xStart + t * (xEnd - xStart), a: 0))
+        }
+        let feature = SurfaceFeature(
+            id: 1, type: .hole, shape: .custom,
+            xCenter: (xStart + xEnd) / 2.0, aCenterDeg: 0,
+            dimensions: ["length": xEnd - xStart], confidence: 1.0, path: path
+        )
+        stock.features.append(feature)
+        
+        let gen = GCodeGenerator()
+        var s = simpleSettings()
+        s.maxAccelX = 500.0 // mm/s^2
+        s.maxJerkX = 1000.0  // mm/s^3 (low jerk for visible S-curve)
+        s.feedRate = 6000.0  // 100 mm/s
+        s.useSimCNC = false
+        s.enableThermalHedging = false
+        gen.settings = s
+        
+        let gcode = gen.generateGCode(for: stock)
+        let lines = gcode.components(separatedBy: "\n")
+        
+        var velocities: [Double] = []
+        var times: [Double] = []
+        var lastX: Double? = nil
+        var currentTime: Double = 0
+        
+        for line in lines where line.hasPrefix("G1") {
+            guard let xRange = line.range(of: "X"),
+                  let fRange = line.range(of: "F") else { continue }
+            
+            let xStr = line[xRange.upperBound...].prefix(while: { $0.isNumber || $0 == "." || $0 == "-" })
+            let fStr = line[fRange.upperBound...].prefix(while: { $0.isNumber || $0 == "." || $0 == "-" })
+            
+            if let x = Double(xStr), let f = Double(fStr) {
+                let v = f / 60.0 // mm/s
+                if let lx = lastX {
+                    let dx = abs(x - lx)
+                    let vAvg = (v + (velocities.last ?? 0)) / 2.0
+                    let dt = dx / max(vAvg, 1.0)
+                    currentTime += dt
+                    times.append(currentTime)
+                    velocities.append(v)
+                } else {
+                    velocities.append(v)
+                    times.append(0)
+                }
+                lastX = x
+            }
+        }
+        
+        XCTAssertGreaterThan(velocities.count, 10, "Should have enough G1 moves to check profile")
+        
+        var accelerations: [Double] = []
+        for i in 1..<velocities.count {
+            // dv between midpoints of segments
+            let dv = velocities[i] - velocities[i-1]
+            let dt = (times[i] - times[i-1])
+            if dt > 1e-6 {
+                accelerations.append(dv / dt)
+            }
+        }
+        
+        // Verify acceleration does not exceed maxAccelX (with some tolerance for discrete sampling)
+        for a in accelerations {
+            XCTAssertLessThanOrEqual(abs(a), Double(s.maxAccelX) * 1.5, "Acceleration \(a) exceeds limit \(s.maxAccelX)")
+        }
+        
+        // Check for S-curve: initial acceleration should be ramped.
+        if accelerations.count > 10 {
+            let firstNonZeroA = accelerations.first { abs($0) > 1.0 } ?? 0
+            XCTAssertLessThan(abs(firstNonZeroA), Double(s.maxAccelX) * 0.8, "Initial acceleration should be ramped (S-curve)")
+        }
+    }
+
+    func testJerkScalingByThickness() {
+        let manager = CutPresetManager.shared
+        
+        // 1/4" (6.35mm) is our baseline.
+        let thinPreset = CutPreset(name: "Thin", source: "Test", amperage: 45, feedRate: 1000, thickness: 6.35, kerfWidth: 1.0, cutHeight: 1.0, pierceHeight: 1.0)
+        manager.presets = [thinPreset]
+        manager.activePresetID = thinPreset.id
+        manager.advancedSettings.maxJerkX = 1000.0
+        manager.advancedSettings.maxJerkA = 5000.0
+        manager.advancedSettings.maxJerkY = 5000.0
+        manager.advancedSettings.maxJerkZ = 2000.0
+        
+        let settingsThin = manager.currentGCodeSettings()
+        XCTAssertEqual(Double(settingsThin.maxJerkX), 1000.0, accuracy: 0.1)
+        XCTAssertEqual(Double(settingsThin.maxJerkA), 5000.0, accuracy: 0.1)
+        
+        // 1/2" (12.7mm) is double thickness, should half the jerk.
+        let thickPreset = CutPreset(name: "Thick", source: "Test", amperage: 45, feedRate: 1000, thickness: 12.7, kerfWidth: 1.0, cutHeight: 1.0, pierceHeight: 1.0)
+        manager.presets.append(thickPreset)
+        manager.activePresetID = thickPreset.id
+        
+        let settingsThick = manager.currentGCodeSettings()
+        XCTAssertEqual(Double(settingsThick.maxJerkX), 500.0, accuracy: 0.1, "X Jerk should be halved for double thickness")
+        XCTAssertEqual(Double(settingsThick.maxJerkA), 2500.0, accuracy: 0.1, "A Jerk should be halved for double thickness")
+        
+        // Y and Z should remain unscaled
+        XCTAssertEqual(Double(settingsThick.maxJerkY), 5000.0, accuracy: 0.1)
+        XCTAssertEqual(Double(settingsThick.maxJerkZ), 2000.0, accuracy: 0.1)
+    }
+
     // MARK: - Integration Tests
     
     private var examplesURL: URL {

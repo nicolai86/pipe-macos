@@ -223,6 +223,15 @@ struct SettingsView: View {
                 } header: {
                     AdvancedSectionHeader(title: "Axis Acceleration Limits", info: "Must match the acceleration values configured in your machine controller (Mach4 motor tuning, LinuxCNC INI MAX_ACCELERATION). These are used by the velocity profiler to compute safe junction speeds and feed-rate ramps — they do not change the controller's actual limits. Setting these higher than the controller allows will produce feed-rate commands the machine cannot execute, causing missed steps or stalls. Setting them lower than the controller's actual capability leaves cut-speed potential unused. The A axis typically has the lowest practical limit due to chuck inertia; verify at low feed rate before raising it.")
                 }
+
+                Section {
+                    advancedField("X Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkX)
+                    advancedField("Y Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkY)
+                    advancedField("Z Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkZ)
+                    advancedField("A Axis", unit: "°/s³",  value: $manager.advancedSettings.maxJerkA)
+                } header: {
+                    AdvancedSectionHeader(title: "Axis Jerk Limits (S-Curve)", info: "Defines the rate of change of acceleration. These limits enable S-curve velocity profiling to reduce mechanical resonance and vibration. X and A values are automatically scaled down for thicker/heavier material presets to account for increased inertia (referenced to a 1/4\" 20ft stick). Y and Z carry only the torch and use fixed limits.")
+                }
             }
             .formStyle(.grouped)
             .padding(.horizontal)
@@ -279,7 +288,7 @@ struct SettingsView: View {
 
     private func addNewPreset() {
         let p = CutPreset(name: "New Preset", source: "Custom", amperage: 45,
-                          feedRate: 1000, kerfWidth: 2.0, cutHeight: 3.2, pierceHeight: 3.8)
+                          feedRate: 1000, thickness: 1.0, kerfWidth: 2.0, cutHeight: 3.2, pierceHeight: 3.8)
         isAddingNew = true
         editingPreset = p
     }
@@ -377,6 +386,11 @@ private struct PresetDetailView: View {
                         .font(.system(.body, design: .monospaced))
                 }
                 GridRow {
+                    Text("Thickness").foregroundColor(.secondary)
+                    Text(String(format: "%.3f mm", preset.thickness))
+                        .font(.system(.body, design: .monospaced))
+                }
+                GridRow {
                     Text("Kerf Width").foregroundColor(.secondary)
                     Text(String(format: "%.3f mm", preset.kerfWidth))
                         .font(.system(.body, design: .monospaced))
@@ -439,6 +453,7 @@ private struct PresetEditForm: View {
 
                 Section("Cut Parameters") {
                     formField("Feed Rate",     unit: "mm/min", value: $draft.feedRate,     width: 80)
+                    formField("Thickness",     unit: "mm",     value: $draft.thickness,    width: 70)
                     formField("Kerf Width",    unit: "mm",     value: $draft.kerfWidth,    width: 70)
                     formField("Cut Height",    unit: "mm",     value: $draft.cutHeight,    width: 70)
                     formField("Pierce Height", unit: "mm",     value: $draft.pierceHeight, width: 70)

@@ -93,7 +93,10 @@ struct GCodeSettings {
     // -------------------------------------------------------------------------
 
     /// When `true`, applies an Adaptive Damped Least Squares filter to A-axis motion.
-    /// Dynamically adjusts damping based on the local curvature to prevent A-axis motor stalls.
+    /// WHY: On rectangular stock, the kinematic Jacobian becomes singular at corners (radius of rotation -> 0).
+    /// This causes the required A-axis angular velocity to approach infinity to maintain constant surface speed.
+    /// ADLS dynamically damps these "velocity blow-ups" to prevent motor stalls while staying within a
+    /// defined path-error tolerance.
     var enableSingularityDamping: Bool = true
 
     /// The maximum damping factor applied at the peak of a singularity (corner).
@@ -123,6 +126,10 @@ struct GCodeSettings {
     // -------------------------------------------------------------------------
 
     var useSimCNC: Bool = true
+    /// WHY: On HSS stock, the G-code actively commands Z-axis moves to track flat faces
+    /// and corners. If the controller's arc-voltage THC is active at the same time,
+    /// a dual-loop conflict occurs, causing the Z-axis to oscillate or dive.
+    /// Dynamic THC injects lock codes at corners to prioritize the kinematic toolpath.
     var enableDynamicTHC: Bool = true
     var units: GCodeUnit = .metric
 
@@ -134,6 +141,19 @@ struct GCodeSettings {
     var maxAccelY: CGFloat = 500.0
     var maxAccelZ: CGFloat = 300.0
     var maxAccelA: CGFloat = 1000.0
+
+    // -------------------------------------------------------------------------
+    // MARK: Per-Axis Jerk Limits (S-curve)
+    // -------------------------------------------------------------------------
+
+    /// WHY: Trapezoidal acceleration causes infinite jerk at ramp start/end, leading to
+    /// mechanical resonance and vibration. This is especially critical for the A-axis (chuck)
+    /// which has the highest inertia in the system. S-curve profiling smooths these
+    /// transitions by limiting mm/s³ (jerk).
+    var maxJerkX: CGFloat = 5000.0
+    var maxJerkY: CGFloat = 5000.0
+    var maxJerkZ: CGFloat = 2000.0
+    var maxJerkA: CGFloat = 10000.0
 
     // -------------------------------------------------------------------------
     // MARK: Thermal Hedging
@@ -167,6 +187,7 @@ struct TrajectorySegment {
     var dZm: CGFloat
     var dAm: CGFloat
     var aPath: CGFloat
+    var jPath: CGFloat
     var finalF: CGFloat = 0.0
 }
 
@@ -858,6 +879,11 @@ class GCodeGenerator {
         let aMaxZ = settings.maxAccelZ * 3600.0
         let aMaxA = settings.maxAccelA * 3600.0
 
+        let jMaxX = settings.maxJerkX * 216000.0
+        let jMaxY = settings.maxJerkY * 216000.0
+        let jMaxZ = settings.maxJerkZ * 216000.0
+        let jMaxA = settings.maxJerkA * 216000.0
+
         for i in 1..<machinePoints.count {
             let prev = machinePoints[i - 1]
             let curr = machinePoints[i]
@@ -884,6 +910,16 @@ class GCodeGenerator {
                 abs(dAm) > 1e-6
                     ? aMaxA * dS / abs(dAm) : .greatestFiniteMagnitude
             )
+            let jPath = min(
+                abs(dXm) > 1e-6
+                    ? jMaxX * dS / abs(dXm) : .greatestFiniteMagnitude,
+                abs(dYm) > 1e-6
+                    ? jMaxY * dS / abs(dYm) : .greatestFiniteMagnitude,
+                abs(dZm) > 1e-6
+                    ? jMaxZ * dS / abs(dZm) : .greatestFiniteMagnitude,
+                abs(dAm) > 1e-6
+                    ? jMaxA * dS / abs(dAm) : .greatestFiniteMagnitude
+            )
             segments.append(
                 TrajectorySegment(
                     dS: dS,
@@ -892,7 +928,8 @@ class GCodeGenerator {
                     dYm: dYm,
                     dZm: dZm,
                     dAm: dAm,
-                    aPath: aPath
+                    aPath: aPath,
+                    jPath: jPath
                 )
             )
         }
@@ -931,25 +968,57 @@ class GCodeGenerator {
             }
         }
 
+        // --- S-Curve Velocity Profiling ---
+        // Uses the S-curve distance formula: s = v_avg * (dv/a + a/j)
+        // to find the maximum reachable velocity over each segment.
+
+        func solveMaxV(v0: CGFloat, s: CGFloat, a: CGFloat, j: CGFloat)
+            -> CGFloat
+        {
+            if s < 1e-6 { return v0 }
+            // Case 1: reach a_max. Solve quadratic: j*v1^2 + a^2*v1 + (a^2*v0 - j*v0^2 - 2*s*a*j) = 0
+            let b = a * a
+            let c = a * a * v0 - j * v0 * v0 - 2.0 * s * a * j
+            let disc = b * b - 4.0 * j * c
+            if disc < 0 { return v0 + sqrt(2.0 * a * s) }  // Fallback to trapezoidal
+            let v1_quad = (-b + sqrt(disc)) / (2.0 * j)
+
+            // Case 2: don't reach a_max. s = (v0 + v1) * sqrt((v1 - v0)/j)
+            // Approx v1 using trapezoidal then refine
+            var v1 = v0 + sqrt(2.0 * min(a, sqrt(j * (v1_quad - v0 + 1.0))) * s)
+            for _ in 0..<3 {
+                let dv = max(0, v1 - v0)
+                let t = 2.0 * sqrt(dv / j)
+                let s_req = (v0 + v1) / 2.0 * t
+                v1 = v1 * (s / max(s_req, 1e-6))
+            }
+
+            return max(v0, min(v1_quad, v1))
+        }
+
+        // 1. Forward pass (Jerk-limited)
         var vFwd = [CGFloat](repeating: 0.0, count: machinePoints.count)
-        vFwd[0] = vJunction[0]
+        vFwd[0] = 0
         for i in 0..<segments.count {
+            let seg = segments[i]
+            let a = seg.aPath
+            let j = seg.jPath
             vFwd[i + 1] = min(
-                sqrt(
-                    pow(vFwd[i], 2) + 2.0 * segments[i].aPath * segments[i].dS
-                ),
-                vJunction[i + 1]
+                vJunction[i + 1],
+                solveMaxV(v0: vFwd[i], s: seg.dS, a: a, j: j)
             )
         }
+
+        // 2. Backward pass (Jerk-limited)
         var vFinal = [CGFloat](repeating: 0.0, count: machinePoints.count)
-        vFinal[segments.count] = vFwd[segments.count]
+        vFinal[segments.count] = 0
         for i in stride(from: segments.count - 1, through: 0, by: -1) {
+            let seg = segments[i]
+            let a = seg.aPath
+            let j = seg.jPath
             vFinal[i] = min(
                 vFwd[i],
-                sqrt(
-                    pow(vFinal[i + 1], 2) + 2.0 * segments[i].aPath
-                        * segments[i].dS
-                )
+                solveMaxV(v0: vFinal[i + 1], s: seg.dS, a: a, j: j)
             )
         }
         for i in 0..<segments.count {
@@ -1001,7 +1070,7 @@ class GCodeGenerator {
                     "#50 = #4061                  ; THC OFF (Corner Lock)"
                 )
                 lines.append(
-                    "#4061 = 1                  ; THC OFF (Corner Lock)"
+                    "#4061 = 100                  ; THC OFF (Corner Lock)"
                 )
                 currentTHCState = false
             } else {
@@ -1017,8 +1086,9 @@ class GCodeGenerator {
             if settings.enableDynamicTHC {
                 if curr.isCorner && currentTHCState {
                     lines.append(
-                        "#50 = #4061; #4061 = 1; currentTHCState = false"
+                        "#50 = #4061"
                     )
+                    lines.append("#4061 = 100; currentTHCState = false")
                 } else if !curr.isCorner && !currentTHCState {
                     lines.append("#4061 = #50; currentTHCState = true")
                 }

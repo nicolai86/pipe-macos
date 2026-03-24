@@ -30,12 +30,6 @@ Feature Detection
   ---
   Kinematics & GCode
 
-  5. Jerk-limited (S-curve) velocity profiling
-  The current forward/backward pass is a trapezoidal acceleration model. This is state-of-the-art for ~2015; modern motion controllers (Klipper, Marlin, Grbl-HAL) and all high-end servo drives now use jerk-limited
-  S-curve profiles. Adding a jerk limit (mm/s³ per axis) as a third constraint tier in the profiler would reduce mechanical resonance and vibration on the A-axis rotation at the start and end of cuts, which is the
-  axis with the highest inertia.
-
-
   7. G93 Inverse Time Mode as an alternative to G94 spoofing
   The 4D spoofed G94 feedrate is a clever workaround for SimCNC's limitation, but it is mathematically fragile when the A-axis displacement is small relative to the XYZ displacement (the denominator dMachine
   becomes XYZ-dominated and the time preservation breaks down). G93 (Inverse Time) is the standard solution for this exact problem — the F-word specifies reciprocal time (1/min) rather than velocity, making it

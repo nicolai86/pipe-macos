@@ -211,6 +211,9 @@ class ModelLoader {
         var tubeAxis = pcaAxis
 
         // --- Step 2: Cluster exact OCCT plane normals (rotation-invariant, no winding dependency) ---
+        // WHY: We extract plane normals directly from the OpenCASCADE B-Rep geometry. 
+        // By clustering these normals, we find the dominant faces of a square or rectangular tube.
+        // This method is robust against arbitrary stock orientation in the STEP file.
         var normalClusters: [(dir: SIMD3<Float>, weight: Int)] = []
         for f in facesData {
             guard let type = f["surface_type"] as? String, type == "PLANE",
@@ -250,6 +253,9 @@ class ModelLoader {
         // angular span of each cylinder's tessellation vertices in the cross-section
         // plane via the "largest-gap" method (span = 2π − maxGap) so the result is
         // exact and model-independent — no hardcoded radius or vertex-count limits.
+        // WHY: This is the critical discriminator between a round tube (HSS-O) and
+        // rectangular stock with fillets. A round tube will have at least one cylinder
+        // with >180° span, while a fillet never exceeds 90°.
         var maxCylAngularSpan: Float = 0
         for f in facesData {
             guard let type = f["surface_type"] as? String, type == "CYLINDER",
@@ -473,6 +479,9 @@ class ModelLoader {
         // We now extract and maintain the exact OpenCASCADE wire topology.
         // BRepTools_WireExplorer guarantees edges are sequential. We append them safely
         // without distance-guessing, which prevents jumping kerf gaps.
+        // WHY: Naive point-clustering often fails when multiple cut lines are close 
+        // (e.g. kerf width gaps). By following the topological wires, we ensure that
+        // feature boundaries are extracted exactly as defined in the CAD model.
         // =================================================================================
         var partialLoops: [[SIMD3<Float>]] = []
 
