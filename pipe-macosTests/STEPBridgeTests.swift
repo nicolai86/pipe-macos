@@ -187,6 +187,238 @@ final class STEPBridgeTests: XCTestCase {
         }
     }
 
+    func testHSS3in2inNotched() throws {
+        let name = "hss/3in-2in-notched.step"
+        let _ = try skip(ifMissing: name)
+        
+        guard let model = loadModel(name),
+              let stock = model.selectableShapes.first?.stockInfo else {
+            XCTFail("Failed to load model or extract stock info")
+            return
+        }
+        
+        // 1. Assert features
+        XCTAssertEqual(stock.features.count, 3, "Expected 3 features (start/end + 1 cutout)")
+        for (i, f) in stock.features.enumerated() {
+            print("FEATURE \(i): type=\(f.type) xCenter=\(f.xCenter) pathPoints=\(f.path?.count ?? 0)")
+            if let path = f.path {
+                var len = 0.0
+                for j in 1..<path.count {
+                    let dx = path[j].x - path[j-1].x
+                    // Use a rough conversion for A to mm for debugging length
+                    let da_mm = (path[j].a - path[j-1].a) * (.pi * 76.2 / 360.0) 
+                    len += sqrt(Double(dx*dx + da_mm*da_mm))
+                }
+                print("  approx 2D length: \(len)mm")
+            }
+        }
+        let counts = stock.features.reduce(into: [SurfaceFeatureType: Int]()) { $0[$1.type, default: 0] += 1 }
+        XCTAssertEqual(counts[.startCut], 1)
+        XCTAssertEqual(counts[.endCut], 1)
+        XCTAssertEqual(counts[.cutout], 1)
+        
+        let gen = GCodeGenerator()
+        var s = GCodeSettings()
+        s.enableThermalHedging = false
+        s.useSimCNC = false
+        s.units = .metric
+        s.enableKerfComp = false
+        s.enableNonlinearErrorCompensation = false
+        s.enableSingularityDamping = false
+        gen.settings = s
+        
+        let gcode = gen.generateGCode(for: stock)
+        let lines = gcode.components(separatedBy: .newlines)
+        
+        struct G1Move {
+            var x, y, z, a: Double?
+        }
+        
+        var cutBlocks: [[G1Move]] = []
+        var currentBlock: [G1Move] = []
+        var insideM3M5 = false
+        
+        for line in lines {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.contains("M3") {
+                insideM3M5 = true
+                currentBlock = []
+            } else if t.contains("M5") {
+                if insideM3M5 && !currentBlock.isEmpty {
+                    cutBlocks.append(currentBlock)
+                }
+                insideM3M5 = false
+                currentBlock = []
+            } else if insideM3M5 && (t.hasPrefix("G1") || t.hasPrefix("G0")) {
+                var move = G1Move()
+                let parts = t.components(separatedBy: .whitespaces)
+                for p in parts {
+                    let valStr = String(p.dropFirst())
+                    if p.hasPrefix("X") { move.x = Double(valStr) }
+                    else if p.hasPrefix("Y") { move.y = Double(valStr) }
+                    else if p.hasPrefix("Z") { move.z = Double(valStr) }
+                    else if p.hasPrefix("A") { move.a = Double(valStr) }
+                }
+                currentBlock.append(move)
+            }
+        }
+        
+        XCTAssertEqual(cutBlocks.count, 3, "Expected 3 cutting blocks")
+        
+        var foundLargeCutout = false
+        var straightCuts = 0;
+        for (idx, block) in cutBlocks.enumerated() {
+            let xValues = block.compactMap { $0.x }.filter { !$0.isNaN }
+            let yValues = block.compactMap { $0.y }.filter { !$0.isNaN }
+            let zValues = block.compactMap { $0.z }.filter { !$0.isNaN }
+            let aValues = block.compactMap { $0.a }.filter { !$0.isNaN }
+            
+            let xSpan = (xValues.max() ?? 0) - (xValues.min() ?? 0)
+            let aSpan = (aValues.max() ?? 0) - (aValues.min() ?? 0)
+            
+            
+            if xSpan < 0.01 && aSpan > 350.0 {
+                // Straight sever cut: No X movement, full rotation.
+                // Already covered by other tests, but good to see here.
+                straightCuts = 1 + straightCuts
+            } else if xSpan > 1.0 {
+                // This should be our 3-face cutout.
+                // "the 3 faced cutout should have movement on pretty much all axis."
+                XCTAssertGreaterThan((yValues.max() ?? 0) - (yValues.min() ?? 0), 1.0, "Y should move in 3-face cutout")
+                XCTAssertGreaterThan((zValues.max() ?? 0) - (zValues.min() ?? 0), 1.0, "Z should move in 3-face cutout")
+                
+                // maybe we can assert that we rotate the tube by ~180 degrees?
+                // 2 faces out of 4 is 180 degrees in the mapping.
+                XCTAssertGreaterThan(aSpan, 170.0, "Cutout should span approx 2 faces (~180 deg), got \(aSpan)")
+                XCTAssertLessThan(aSpan, 350.0, "Cutout should NOT be a full circle")
+                
+                // Assert total path length is at least 6" (152.4mm)
+                // and no more than 247.072mm + lead-in/overburn.
+                var totalDist = 0.0
+                for i in 1..<block.count {
+                    let p1 = block[i-1]
+                    let p2 = block[i]
+                    let dx = (p2.x ?? p1.x ?? 0) - (p1.x ?? 0)
+                    let dy = (p2.y ?? p1.y ?? 0) - (p1.y ?? 0)
+                    let dz = (p2.z ?? p1.z ?? 0) - (p1.z ?? 0)
+                    totalDist += sqrt(dx*dx + dy*dy + dz*dz)
+                }
+                
+                XCTAssertGreaterThan(totalDist, 152.4, "Cutout path length should be at least 6 inches (152.4mm), got \(totalDist)mm")
+                
+                // The measured geometry for one side is 247.072mm.
+                // Since the cutout passes through BOTH the front and back of the tube (3 faces on each side),
+                // the total toolpath length reflects the full loop.
+                let expectedTotalPath = 459.312 
+                XCTAssertEqual(totalDist, expectedTotalPath, accuracy: 1.0, "Cutout path length should be approximately 459.312mm")
+                
+                foundLargeCutout = true
+            }
+        }
+        
+        XCTAssertTrue(foundLargeCutout, "Did not find the 3-face cutout block")
+        XCTAssertEqual(straightCuts, 2, "2 straight cuts")
+    }
+
+    func testHSSO1_6in2Notches() throws {
+        let name = "hss-o/1.6in-2-notches.step"
+        let _ = try skip(ifMissing: name)
+        
+        guard let model = loadModel(name),
+              let stock = model.selectableShapes.first?.stockInfo else {
+            XCTFail("Failed to load model or extract stock info")
+            return
+        }
+        
+        // 1. Assert exactly 4 features (startCut, endCut, and 2 additional features)
+        // Note: In this specific model, the internal features are identified as cutouts because they are far from the ends.
+        XCTAssertEqual(stock.features.count, 4, "Expected 4 features (start/end + 2 cutouts). Found: \(stock.features.count)")
+        let counts = stock.features.reduce(into: [SurfaceFeatureType: Int]()) { $0[$1.type, default: 0] += 1 }
+        XCTAssertEqual(counts[.startCut], 1, "Expected 1 startCut, found \(counts[.startCut] ?? 0)")
+        XCTAssertEqual(counts[.endCut], 1, "Expected 1 endCut, found \(counts[.endCut] ?? 0)")
+        XCTAssertEqual(counts[.cutout], 2, "Expected 2 cutouts, found \(counts[.cutout] ?? 0). Full list: \(stock.features.map { $0.type })")
+        
+        let gen = GCodeGenerator()
+        var s = GCodeSettings()
+        s.enableThermalHedging = false
+        s.useSimCNC = false
+        s.units = .metric
+        s.enableKerfComp = false
+        s.enableNonlinearErrorCompensation = false
+        s.enableSingularityDamping = false
+        gen.settings = s
+        
+        let gcode = gen.generateGCode(for: stock)
+        let lines = gcode.components(separatedBy: .newlines)
+        
+        struct G1Move {
+            var x, y, z, a: Double?
+        }
+        
+        var cutBlocks: [[G1Move]] = []
+        var currentBlock: [G1Move] = []
+        var insideM3M5 = false
+        
+        for line in lines {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.contains("M3") {
+                insideM3M5 = true
+                currentBlock = []
+            } else if t.contains("M5") {
+                if insideM3M5 && !currentBlock.isEmpty {
+                    cutBlocks.append(currentBlock)
+                }
+                insideM3M5 = false
+                currentBlock = []
+            } else if insideM3M5 && (t.hasPrefix("G1") || t.hasPrefix("G0")) {
+                var move = G1Move()
+                let parts = t.components(separatedBy: .whitespaces)
+                for p in parts {
+                    let valStr = String(p.dropFirst())
+                    if p.hasPrefix("X") { move.x = Double(valStr) }
+                    else if p.hasPrefix("Y") { move.y = Double(valStr) }
+                    else if p.hasPrefix("Z") { move.z = Double(valStr) }
+                    else if p.hasPrefix("A") { move.a = Double(valStr) }
+                }
+                currentBlock.append(move)
+            }
+        }
+        
+        XCTAssertEqual(cutBlocks.count, 4, "Expected 4 cutting blocks")
+        
+        var straightCutsCount = 0
+        var featureCutsCount = 0
+        
+        for (idx, block) in cutBlocks.enumerated() {
+            let xValues = block.compactMap { $0.x }.filter { !$0.isNaN }
+            let yValues = block.compactMap { $0.y }.filter { !$0.isNaN }
+            let zValues = block.compactMap { $0.z }.filter { !$0.isNaN }
+            let aValues = block.compactMap { $0.a }.filter { !$0.isNaN }
+            
+            let xSpan = (xValues.max() ?? 0) - (xValues.min() ?? 0)
+            let ySpan = (yValues.max() ?? 0) - (yValues.min() ?? 0)
+            let zSpan = (zValues.max() ?? 0) - (zValues.min() ?? 0)
+            
+            if xSpan < 0.01 {
+                // Straight cut: No movement on X, Y, or Z. Only A.
+                XCTAssertLessThan(ySpan, 0.01, "Y moved in straight cut block \(idx)")
+                XCTAssertLessThan(zSpan, 0.01, "Z moved in straight cut block \(idx)")
+                XCTAssertGreaterThan(aValues.count, 0, "No A moves in straight cut block \(idx)")
+                straightCutsCount += 1
+            } else {
+                // Feature (Notch/Cutout): Movement on X and A. No movement on Y or Z.
+                XCTAssertLessThan(ySpan, 0.01, "Y moved in feature block \(idx)")
+                XCTAssertLessThan(zSpan, 0.01, "Z moved in feature block \(idx)")
+                XCTAssertGreaterThan(xSpan, 0.1, "X did not move in feature block \(idx)")
+                XCTAssertGreaterThan(aValues.count, 0, "No A moves in feature block \(idx)")
+                featureCutsCount += 1
+            }
+        }
+        
+        XCTAssertEqual(straightCutsCount, 2, "Expected 2 straight cut blocks")
+        XCTAssertEqual(featureCutsCount, 2, "Expected 2 feature cut blocks")
+    }
+
     func testCylinderOneNotch() throws {
         let name = "cylinder-one-notch.step"
         let _ = try skip(ifMissing: name)

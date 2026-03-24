@@ -491,7 +491,7 @@ final class GCodeGeneratorTests: XCTestCase {
         let genInches = makeGen(units: .inches)
 
         var shape = SelectedShape(); shape.shapeData = ShapeData(type: .cylinder, dimensions: nil, isCuttable: true, stockInfo: stock)
-        let entry = PackEntry(shape: shape, packStartX: 0, rollOffset: 0)
+        let entry = PackEntry(shape: shape, packStartX: 0)
 
         let gcodeMetric = genMetric.generatePackGCode(entries: [entry])
         let gcodeInches = genInches.generatePackGCode(entries: [entry])
@@ -507,7 +507,7 @@ final class GCodeGeneratorTests: XCTestCase {
         stock.features.append(makeSeverCut(type: .startCut, xPos: 0))
 
         var shape = SelectedShape(); shape.shapeData = ShapeData(type: .cylinder, dimensions: nil, isCuttable: true, stockInfo: stock)
-        let entry = PackEntry(shape: shape, packStartX: 0, rollOffset: 0)
+        let entry = PackEntry(shape: shape, packStartX: 0)
 
         let gcodeInches = makeGen(units: .inches).generatePackGCode(entries: [entry])
         XCTAssertTrue(gcodeInches.contains("G92 X20.0000"),
@@ -690,14 +690,7 @@ final class GCodeGeneratorTests: XCTestCase {
         let gen = GCodeGenerator()
         gen.settings = simpleSettings()
         
-        let q1 = alignAxisToX(stock.axis)
-        var rollDeg: CGFloat = 0
-        if stock.profile != .round {
-            let rotatedU = q1.act(simd_normalize(stock.uAxis))
-            let rollAngle = atan2(rotatedU.z, rotatedU.y)
-            rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
-        }
-        let gcode = gen.generateGCode(for: stock, rollOffset: rollDeg)
+        let gcode = gen.generateGCode(for: stock)
         let lines = gcode.components(separatedBy: CharacterSet.newlines)
         
         var currentFeature: String? = nil

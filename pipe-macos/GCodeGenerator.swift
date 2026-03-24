@@ -1,5 +1,6 @@
 import Foundation
 import SceneKit
+import simd
 
 // MARK: - Pack Entry
 
@@ -8,8 +9,6 @@ struct PackEntry {
     let shape: SelectedShape
     /// X coordinate of the piece's low-X end in pack space (mm).
     let packStartX: CGFloat
-    /// Degrees to add to all A angles so that A=0 aligns with the roll-corrected "up" face.
-    let rollOffset: CGFloat
     /// X coordinate of the piece's high-X end in pack space (mm).
     var packEndX: CGFloat { packStartX + (shape.stockInfo?.length ?? 0) }
 }
@@ -196,9 +195,8 @@ class GCodeGenerator {
     var settings = GCodeSettings()
 
     // MARK: - Single Part Generation
-    func generateGCode(for stock: StockInfo, rollOffset: CGFloat = 0.0)
-        -> String
-    {
+    func generateGCode(for stock: StockInfo) -> String {
+        let rollOffset = GCodeGenerator.calculateRollOffset(for: stock)
         var gcode: [String] = []
         gcode.append(contentsOf: generateHeader(stock: stock))
         gcode.append(
@@ -323,6 +321,7 @@ class GCodeGenerator {
 
             for (idx, entry) in entries.enumerated() {
                 guard let stock = entry.shape.stockInfo else { continue }
+                let rollOffset = GCodeGenerator.calculateRollOffset(for: stock)
                 for f in stock.features {
                     allFeatures.append(
                         GlobalFeature(
@@ -330,7 +329,7 @@ class GCodeGenerator {
                             stock: stock,
                             packStartX: entry.packStartX,
                             packEndX: entry.packEndX,
-                            rollOffset: entry.rollOffset,
+                            rollOffset: rollOffset,
                             pieceIndex: idx
                         )
                     )
@@ -377,6 +376,7 @@ class GCodeGenerator {
             let ordered = entries.sorted { $0.packStartX > $1.packStartX }
             for (pieceIdx, entry) in ordered.enumerated() {
                 guard let stock = entry.shape.stockInfo else { continue }
+                let rollOffset = GCodeGenerator.calculateRollOffset(for: stock)
                 lines += [
                     "",
                     "; ┌── Piece \(pieceIdx + 1)/\(ordered.count)  "
@@ -392,7 +392,7 @@ class GCodeGenerator {
                         stock: stock,
                         packStartX: entry.packStartX,
                         packEndX: entry.packEndX,
-                        rollOffset: entry.rollOffset,
+                        rollOffset: rollOffset,
                         currentA: currentA,
                         isPackMode: true
                     )
@@ -405,6 +405,26 @@ class GCodeGenerator {
 
         lines += generateEndSequence(stock: refStock)
         return lines.joined(separator: "\n")
+    }
+
+    static func calculateRollOffset(for stock: StockInfo) -> CGFloat {
+        let q1 = alignAxisToX(stock.axis)
+        var rollDeg: CGFloat = 0
+        if stock.profile != .round {
+            let rotatedU = q1.act(normalize(stock.uAxis))
+            let rollAngle = atan2(rotatedU.z, rotatedU.y)
+            rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
+        }
+        return rollDeg
+    }
+
+    private static func alignAxisToX(_ axis: SIMD3<Float>) -> simd_quatf {
+        let target = SIMD3<Float>(1, 0, 0)
+        let a = normalize(axis)
+        let d = dot(a, target)
+        if d > 0.9999 { return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) }
+        if d < -0.9999 { return simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 1, 0)) }
+        return simd_quatf(angle: acos(d), axis: normalize(cross(a, target)))
     }
 
     // MARK: - Thermal Hedging Algorithm
@@ -707,7 +727,7 @@ class GCodeGenerator {
             
             // Generate a simple rotational "arc" (just more points along A)
             let steps = 5
-            for i in 0...steps {
+            for i in 0..<steps {
                 let t = CGFloat(i) / CGFloat(steps)
                 leadInPoints.append(ToolpathPoint(x: p0.x, a: entryA + sideMultiplier * leadAngleDeg * t))
             }

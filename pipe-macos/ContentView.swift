@@ -516,16 +516,7 @@ class AppViewModel: ObservableObject {
             return
         }
         
-        // Calculate the roll offset so A=0 aligns with the top of the flat face
-        let q1 = alignAxisToX(stockInfo.axis)
-        var rollDeg: CGFloat = 0
-        if stockInfo.profile != .round {
-            let rotatedU = q1.act(normalize(stockInfo.uAxis))
-            let rollAngle = atan2(rotatedU.z, rotatedU.y)
-            rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
-        }
-        
-        generatedGCode = generator.generateGCode(for: stockInfo, rollOffset: rollDeg)
+        generatedGCode = generator.generateGCode(for: stockInfo)
         NotificationCenter.default.post(name: .saveGCode, object: nil)
     }
     
@@ -534,7 +525,6 @@ class AppViewModel: ObservableObject {
     /// A single expanded piece (after applying quantity) ready for bin-packing.
     private struct ExpandedPiece {
         let shape: SelectedShape
-        let rollOffset: CGFloat
         var length: CGFloat { shape.stockInfo?.length ?? 0 }
     }
 
@@ -547,15 +537,9 @@ class AppViewModel: ObservableObject {
         var pieces: [ExpandedPiece] = []
         for shape in sorted {
             let ov = shapeOverride(for: shape)
-            guard ov.enabled, let stock = shape.stockInfo else { continue }
-            let q1 = alignAxisToX(stock.axis)
-            var rollDeg: CGFloat = 0
-            if stock.profile != .round {
-                let rotatedU = q1.act(normalize(stock.uAxis))
-                rollDeg = CGFloat(-atan2(rotatedU.z, rotatedU.y) * 180.0 / .pi)
-            }
+            guard ov.enabled, shape.stockInfo != nil else { continue }
             for _ in 0..<max(1, ov.quantity) {
-                pieces.append(ExpandedPiece(shape: shape, rollOffset: rollDeg))
+                pieces.append(ExpandedPiece(shape: shape))
             }
         }
         return pieces
@@ -602,7 +586,7 @@ class AppViewModel: ObservableObject {
     private func makePackEntries(from pieces: [ExpandedPiece], gap: CGFloat, startX: CGFloat = 0) -> [PackEntry] {
         var x = startX
         return pieces.map { piece in
-            let entry = PackEntry(shape: piece.shape, packStartX: x, rollOffset: piece.rollOffset)
+            let entry = PackEntry(shape: piece.shape, packStartX: x)
             x += piece.length + gap
             return entry
         }
