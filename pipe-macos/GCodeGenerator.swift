@@ -478,16 +478,121 @@ class GCodeGenerator {
         return sqrt(dx * dx + arcLen * arcLen)
     }
 
+    // MARK: - HSS Geodesic Arc-Length Profile
+
+    /// Maps between the angular coordinate A (degrees, as stored in ToolpathPoint.a)
+    /// and the geodesic arc-length s (mm) along the outer perimeter of a rectangular HSS.
+    ///
+    /// Giving the kerf-offset algorithm a geodesic working plane means each millimetre
+    /// of s is exactly 1 mm of surface distance, so a 2D perpendicular offset in (X, s)
+    /// space equals a true geodesic kerf offset on the tube surface.
+    ///
+    /// The uniform approximation k = π·OD/360 treats every point on the cross-section
+    /// as if it sat on a circle of radius OD/2.  For the flat sides that over-compensates
+    /// (infinite radius of curvature), and for corner fillets it is wrong by a factor of
+    /// roughly OD/(2·cornerRadius) — typically ~8× for standard 3 mm fillets on 50 mm HSS.
+    private struct HSSGeodesicProfile {
+        private struct Sample { let a: CGFloat; let s: CGFloat }
+        /// Sorted by both .a and .s — CCW tracing guarantees both are monotone.
+        private let table: [Sample]
+        let perimeter: CGFloat
+
+        init(odX: CGFloat, odY: CGFloat, cornerRadius: CGFloat) {
+            let R  = max(cornerRadius, 0.1)
+            let hw = odX / 2.0 - R
+            let hh = odY / 2.0 - R
+            var raw: [(a: CGFloat, s: CGFloat)] = []
+            var cumS: CGFloat = 0
+
+            let nFlat = 30   // samples per flat segment
+            let nArc  = 15   // samples per 90° fillet arc
+
+            func sa(u: CGFloat, v: CGFloat) -> CGFloat {
+                var a = CGFloat(atan2(Double(v), Double(u)) * 180.0 / .pi)
+                if a < 0 { a += 360 }
+                return a
+            }
+            func flatSeg(u0: CGFloat, v0: CGFloat, u1: CGFloat, v1: CGFloat) {
+                let len = sqrt((u1-u0)*(u1-u0) + (v1-v0)*(v1-v0))
+                guard len > 1e-6 else { return }
+                for i in 0..<nFlat {
+                    let t = CGFloat(i) / CGFloat(nFlat)
+                    raw.append((sa(u: u0 + t*(u1-u0), v: v0 + t*(v1-v0)), cumS + len * t))
+                }
+                cumS += len
+            }
+            func arcSeg(cx: CGFloat, cy: CGFloat, phi0: CGFloat, phi1: CGFloat) {
+                let arcLen = R * abs(phi1 - phi0) * .pi / 180.0
+                guard arcLen > 1e-6 else { return }
+                for i in 0..<nArc {
+                    let t  = CGFloat(i) / CGFloat(nArc)
+                    let ph = phi0 + t * (phi1 - phi0)
+                    let u  = cx + R * CGFloat(cos(Double(ph) * .pi / 180.0))
+                    let v  = cy + R * CGFloat(sin(Double(ph) * .pi / 180.0))
+                    raw.append((sa(u: u, v: v), cumS + arcLen * t))
+                }
+                cumS += arcLen
+            }
+
+            // Trace CCW from A = 0° (midpoint of right face = uAxis direction)
+            flatSeg(u0: odX/2,  v0:  0,      u1: odX/2,  v1:  hh)      // right ↑
+            arcSeg (cx: hw,     cy:  hh,     phi0:  0,   phi1:  90)     // upper-right fillet
+            flatSeg(u0: hw,     v0:  odY/2,  u1: -hw,    v1:  odY/2)   // top →
+            arcSeg (cx: -hw,    cy:  hh,     phi0: 90,   phi1: 180)     // upper-left fillet
+            flatSeg(u0: -odX/2, v0:  hh,     u1: -odX/2, v1: -hh)      // left ↓
+            arcSeg (cx: -hw,    cy: -hh,     phi0: 180,  phi1: 270)     // lower-left fillet
+            flatSeg(u0: -hw,    v0: -odY/2,  u1:  hw,    v1: -odY/2)   // bottom →
+            arcSeg (cx: hw,     cy: -hh,     phi0: 270,  phi1: 360)     // lower-right fillet
+            flatSeg(u0: odX/2,  v0: -hh,     u1:  odX/2, v1:  0)       // right ↑ (lower half)
+
+            perimeter = cumS
+            table = raw.sorted { $0.a < $1.a }.map { Sample(a: $0.a, s: $0.s) }
+        }
+
+        /// Converts angle A (degrees, may be unwrapped outside [0°,360°)) to geodesic arc-length (mm).
+        func encode(_ a: CGFloat) -> CGFloat {
+            let revs = (a / 360.0).rounded(.down)
+            return arcLengthFolded(a - revs * 360.0) + revs * perimeter
+        }
+
+        /// Converts geodesic arc-length (mm, may be unwrapped) to angle A (degrees).
+        func decode(_ s: CGFloat) -> CGFloat {
+            let revs = (s / perimeter).rounded(.down)
+            return angleFolded(s - revs * perimeter) + revs * 360.0
+        }
+
+        private func arcLengthFolded(_ aN: CGFloat) -> CGFloat {
+            guard table.count > 1 else { return aN * perimeter / 360.0 }
+            var lo = 0, hi = table.count
+            while lo < hi { let m = (lo+hi)/2; if table[m].a < aN { lo = m+1 } else { hi = m } }
+            guard lo > 0 else { return table[0].s }
+            guard lo < table.count else { return table.last!.s }
+            let l = table[lo-1], r = table[lo]
+            return l.s + (aN - l.a) / (r.a - l.a) * (r.s - l.s)
+        }
+
+        private func angleFolded(_ sN: CGFloat) -> CGFloat {
+            guard table.count > 1 else { return sN * 360.0 / perimeter }
+            var lo = 0, hi = table.count
+            while lo < hi { let m = (lo+hi)/2; if table[m].s < sN { lo = m+1 } else { hi = m } }
+            guard lo > 0 else { return table[0].a }
+            guard lo < table.count else { return table.last!.a }
+            let l = table[lo-1], r = table[lo]
+            return l.a + (sN - l.s) / (r.s - l.s) * (r.a - l.a)
+        }
+    }
+
     // MARK: - SOTA: Offline 2D Polyline Kerf Offset
 
     private func applyOfflineKerfOffset(
         to path: [ToolpathPoint],
         radius: CGFloat,
         isClosed: Bool,
-        k: CGFloat
+        encode: (CGFloat) -> CGFloat,
+        decode: (CGFloat) -> CGFloat
     ) -> [ToolpathPoint] {
         guard path.count > 1, radius != 0 else { return path }
-        let pts: [(x: CGFloat, y: CGFloat)] = path.map { ($0.x, $0.a * k) }
+        let pts: [(x: CGFloat, y: CGFloat)] = path.map { ($0.x, encode($0.a)) }
         var offsetPts: [(x: CGFloat, y: CGFloat)] = []
 
         for i in 0..<pts.count {
@@ -544,7 +649,7 @@ class GCodeGenerator {
             }
         }
         if isClosed { offsetPts[offsetPts.count - 1] = offsetPts[0] }
-        return offsetPts.map { ToolpathPoint(x: $0.x, a: $0.y / k) }
+        return offsetPts.map { ToolpathPoint(x: $0.x, a: decode($0.y)) }
     }
 
     // MARK: - State of the Art Offline TCP Generation
@@ -573,6 +678,23 @@ class GCodeGenerator {
             stock.profile == .round
             ? (stock.od ?? 50.0) : max(stock.odX ?? 50.0, stock.odY ?? 50.0)
         let k = (.pi * OD) / 360.0
+
+        // Geodesic encode/decode for kerf compensation only.
+        // All other uses of k (distances, overburn, lead-in) are unchanged.
+        // For round stock: s = A·k exactly (identical to the existing formula).
+        // For HSS: s(A) is piecewise nonlinear — geodesic gives a correct offset.
+        let encodeA: (CGFloat) -> CGFloat
+        let decodeS: (CGFloat) -> CGFloat
+        if stock.profile != .round,
+           let oX = stock.odX, let oY = stock.odY,
+           let cr = stock.cornerRadius {
+            let geo = HSSGeodesicProfile(odX: oX, odY: oY, cornerRadius: cr)
+            encodeA = { geo.encode($0) }
+            decodeS = { geo.decode($0) }
+        } else {
+            encodeA = { $0 * k }
+            decodeS = { $0 / k }
+        }
 
         var isInternal =
             (feature.type == .hole || feature.type == .cutout
@@ -684,7 +806,8 @@ class GCodeGenerator {
                 to: finalPath,
                 radius: kerfRadius,
                 isClosed: isInternal,
-                k: k
+                encode: encodeA,
+                decode: decodeS
             )
         }
 

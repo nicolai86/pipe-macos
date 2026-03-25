@@ -30,7 +30,8 @@
       "Bash(pip3 list:*)",
       "Bash(brew --prefix opencascade)",
       "Bash(brew --prefix)",
-      "Bash(GENERATE_FIXTURES=1 xcrun xctest -XCTest \"pipe_macosTests.FixtureGeneratorTests/testGenerateAllFixtures\" /Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app/Contents/PlugIns/pipe-macosTests.xctest)"
+      "Bash(GENERATE_FIXTURES=1 xcrun xctest -XCTest \"pipe_macosTests.FixtureGeneratorTests/testGenerateAllFixtures\" /Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app/Contents/PlugIns/pipe-macosTests.xctest)",
+      "Bash(wc:*)"
     ]
   }
 }
