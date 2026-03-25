@@ -1,0 +1,97 @@
+//
+//  OpenCASCADE.xcconfig
+//  
+//  Xcode configuration file for OpenCASCADE integration
+//  
+//  Usage:
+//  1. Add this file to your Xcode project
+//  2. Select your project in Navigator
+//  3. Go to Info tab
+//  4. Under Configurations, set this file for Debug and/or Release
+//
+//  Note: Adjust OCCT_PREFIX based on your architecture
+//
+
+// ========================================
+// ARCHITECTURE DETECTION
+// ========================================
+
+// For Apple Silicon (M1/M2/M3)
+OCCT_PREFIX_ARM = /opt/homebrew/opt/opencascade
+
+// For Intel Mac
+OCCT_PREFIX_X86 = /usr/local/opt/opencascade
+
+// Auto-select based on build architecture
+// Uncomment the appropriate line for your system:
+
+// Apple Silicon:
+OCCT_PREFIX = $(OCCT_PREFIX_ARM)
+
+// Intel Mac:
+// OCCT_PREFIX = $(OCCT_PREFIX_X86)
+
+// ========================================
+// SEARCH PATHS
+// ========================================
+
+HEADER_SEARCH_PATHS = $(inherited) $(OCCT_PREFIX)/include/opencascade
+LIBRARY_SEARCH_PATHS = $(inherited) $(OCCT_PREFIX)/lib
+
+// ========================================
+// SWIFT-OBJECTIVE-C BRIDGING
+// ========================================
+
+SWIFT_OBJC_BRIDGING_HEADER = $(PROJECT_DIR)/pipe-macos-Bridging-Header.h
+SWIFT_INSTALL_OBJC_HEADER = YES
+SWIFT_OBJC_INTERFACE_HEADER_NAME = $(SWIFT_MODULE_NAME)-Swift.h
+
+// ========================================
+// C++ SETTINGS
+// ========================================
+
+CLANG_CXX_LANGUAGE_STANDARD = gnu++17
+CLANG_CXX_LIBRARY = libc++
+GCC_ENABLE_CPP_EXCEPTIONS = YES
+GCC_ENABLE_CPP_RTTI = YES
+
+// ========================================
+// LINKING
+// ========================================
+
+// OpenCASCADE libraries required for STEP parsing
+// Note: OCCT 7.8.0+ uses TKDESTEP instead of TKSTEP/TKSTEP209/TKSTEPBase/TKSTEPAttr
+OCCT_LIBS = -lTKernel -lTKMath -lTKBRep -lTKGeomBase -lTKGeomAlgo -lTKTopAlgo -lTKPrim -lTKG3d -lTKG2d -lTKDESTEP -lTKXSBase
+
+OTHER_LDFLAGS = $(inherited) $(OCCT_LIBS)
+
+// ========================================
+// BUILD OPTIONS
+// ========================================
+
+CLANG_ENABLE_MODULES = YES
+CLANG_ENABLE_MODULE_DEBUGGING = YES
+ENABLE_STRICT_OBJC_MSGSEND = YES
+
+// ========================================
+// DEPLOYMENT
+// ========================================
+
+// Minimum macOS version (adjust as needed)
+MACOSX_DEPLOYMENT_TARGET = 13.0
+
+// ========================================
+// DEBUGGING (Debug configuration)
+// ========================================
+
+GCC_OPTIMIZATION_LEVEL[config=Debug] = 0
+GCC_GENERATE_DEBUGGING_SYMBOLS[config=Debug] = YES
+SWIFT_OPTIMIZATION_LEVEL[config=Debug] = -Onone
+
+// ========================================
+// OPTIMIZATION (Release configuration)
+// ========================================
+
+GCC_OPTIMIZATION_LEVEL[config=Release] = s
+SWIFT_OPTIMIZATION_LEVEL[config=Release] = -O
+SWIFT_COMPILATION_MODE[config=Release] = wholemodule

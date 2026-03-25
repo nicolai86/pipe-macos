@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(python3:*)",
+      "Bash(xcodebuild -scheme pipe-macos -configuration Debug -destination 'platform=macOS' build)",
+      "Bash(xcodebuild -scheme pipe-macos -configuration Debug)",
+      "Bash(/Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app/Contents/MacOS/pipe-macos --headless)",
+      "Bash(xcodebuild -project pipe-macos.xcodeproj -scheme pipe-macos -configuration Debug build)",
+      "Bash(rm -f /tmp/pipe_debug.txt)",
+      "Bash(open -a /Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app /Users/nicolai86/Workspace/python/pipe-macos/pipe-macos/examples/circ-test-notch-rect-rotate.step)",
+      "Read(//tmp/**)",
+      "Bash(grep -v \"^$\")",
+      "Bash(open -a /Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app /Users/nicolai86/Workspace/python/pipe-macos/pipe-macos/examples/circ-test-rect-complex.step)",
+      "Bash(pkill -f \"pipe-macos\")",
+      "Bash(open -na /Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app /Users/nicolai86/Workspace/python/pipe-macos/pipe-macos/examples/circ-test-rect-complex.step)",
+      "Bash(xcodebuild -scheme pipe-macos -configuration Debug build)",
+      "WebSearch",
+      "WebFetch(domain:plasmaspider.com)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(xcodebuild -project pipe-macos.xcodeproj -target pipe-macosTests -configuration Debug -showBuildSettings)",
+      "Bash(xcodebuild -project pipe-macos.xcodeproj -target pipe-macosTests -configuration Debug build)",
+      "Bash(xcodebuild -project pipe-macos.xcodeproj -target pipe-macosTests -configuration Debug build ONLY_ACTIVE_ARCH=YES)",
+      "Bash(xcodebuild -project pipe-macos.xcodeproj -target pipe-macosTests -configuration Debug -arch arm64 build)",
+      "Bash(xcodebuild -project pipe-macos.xcodeproj -scheme pipe-macosTests -destination 'platform=macOS,arch=arm64' test -arch arm64)",
+      "Bash(xcodebuild -project pipe-macos.xcodeproj -target pipe-macosTests -destination 'platform=macOS' test)",
+      "Bash(xcodebuild:*)",
+      "Read(//opt/homebrew/Cellar/opencascade/7.9.3/lib/**)",
+      "Read(//opt/homebrew/lib/**)",
+      "Bash(pip3 list:*)",
+      "Bash(brew --prefix opencascade)",
+      "Bash(brew --prefix)",
+      "Bash(GENERATE_FIXTURES=1 xcrun xctest -XCTest \"pipe_macosTests.FixtureGeneratorTests/testGenerateAllFixtures\" /Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app/Contents/PlugIns/pipe-macosTests.xctest)"
+    ]
+  }
+}

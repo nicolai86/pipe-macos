@@ -1,0 +1,673 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 70;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		42D713422F6CB34F00932D0D /* OCCT_SETUP.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D713412F6CB34F00932D0D /* OCCT_SETUP.md */; };
+		42D7134C2F6CB41E00932D0D /* OpenCASCADE.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 42D7134B2F6CB41E00932D0D /* OpenCASCADE.xcconfig */; };
+		42D7134E2F6CB47900932D0D /* verify_occt.sh in Resources */ = {isa = PBXBuildFile; fileRef = 42D7134D2F6CB47900932D0D /* verify_occt.sh */; };
+		42D713572F6CB54100932D0D /* SETUP_GUIDE.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D713562F6CB54100932D0D /* SETUP_GUIDE.md */; };
+		42D713592F6CB56D00932D0D /* START_HERE.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D713582F6CB56D00932D0D /* START_HERE.md */; };
+		42D7135E2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D7135D2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md */; };
+		505BE73B3277D1530180D6E0 /* GCodeGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D88B36FAF85A83852AF0854 /* GCodeGenerator.swift */; };
+		A1000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* AppDelegate.swift */; };
+		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
+		A1000003 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000003 /* Assets.xcassets */; };
+		A1000004 /* pipe_macosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000004 /* pipe_macosApp.swift */; };
+		A1000005 /* Model3DView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000005 /* Model3DView.swift */; };
+		A1000006 /* ModelLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000006 /* ModelLoader.swift */; };
+		A1000007 /* ShapeSelector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000007 /* ShapeSelector.swift */; };
+		A100000A /* STEPBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = A200000A /* STEPBridge.mm */; };
+		A100001F /* STEPBridgeWrapper.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000020 /* STEPBridgeWrapper.m */; };
+		A1000020 /* CutPresetManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000021 /* CutPresetManager.swift */; };
+		A1000021 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000022 /* SettingsView.swift */; };
+		A1000032 /* GCodeGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000032 /* GCodeGeneratorTests.swift */; };
+		A1000033 /* STEPBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000033 /* STEPBridgeTests.swift */; };
+		A1000034 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000034 /* XCTest.framework */; };
+		A1000035 /* FeatureDetectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000035 /* FeatureDetectionTests.swift */; };
+		A1000036 /* FixtureGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000036 /* FixtureGeneratorTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A9000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A9000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A6000001;
+			remoteInfo = "pipe-macos";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		2D88B36FAF85A83852AF0854 /* GCodeGenerator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GCodeGenerator.swift; sourceTree = "<group>"; };
+		42D713402F6CB31900932D0D /* pipe-macos-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "pipe-macos-Bridging-Header.h"; sourceTree = "<group>"; };
+		42D713412F6CB34F00932D0D /* OCCT_SETUP.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = OCCT_SETUP.md; sourceTree = "<group>"; };
+		42D713432F6CB36500932D0D /* verify_occt.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = verify_occt.sh; sourceTree = "<group>"; };
+		42D7134B2F6CB41E00932D0D /* OpenCASCADE.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = OpenCASCADE.xcconfig; sourceTree = "<group>"; };
+		42D7134D2F6CB47900932D0D /* verify_occt.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = verify_occt.sh; sourceTree = "<group>"; };
+		42D713552F6CB50200932D0D /* pipe-macos-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "pipe-macos-Bridging-Header.h"; sourceTree = "<group>"; };
+		42D713562F6CB54100932D0D /* SETUP_GUIDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SETUP_GUIDE.md; sourceTree = "<group>"; };
+		42D713582F6CB56D00932D0D /* START_HERE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = START_HERE.md; sourceTree = "<group>"; };
+		42D7135D2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CONVERSATION_MEMORY.md; sourceTree = "<group>"; };
+		42D713672F6DACA900932D0D /* CONSTRAINTS.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CONSTRAINTS.md; sourceTree = "<group>"; };
+		42D713732F6E187A00932D0D /* GOALS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = GOALS.md; sourceTree = "<group>"; };
+		42D714512F6F3FA000932D0D /* RESEARCH.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RESEARCH.md; sourceTree = "<group>"; };
+		42D714532F6F401000932D0D /* IMPROVEMENTS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = IMPROVEMENTS.md; sourceTree = "<group>"; };
+		42D714552F6F578500932D0D /* CODEREVIEW.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CODEREVIEW.md; sourceTree = "<group>"; };
+		A2000001 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A2000003 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A2000004 /* pipe_macosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = pipe_macosApp.swift; sourceTree = "<group>"; };
+		A2000005 /* Model3DView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model3DView.swift; sourceTree = "<group>"; };
+		A2000006 /* ModelLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelLoader.swift; sourceTree = "<group>"; };
+		A2000007 /* ShapeSelector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShapeSelector.swift; sourceTree = "<group>"; };
+		A2000009 /* STEPBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = STEPBridge.h; sourceTree = "<group>"; };
+		A200000A /* STEPBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = STEPBridge.mm; sourceTree = "<group>"; };
+		A200001F /* STEPBridgeWrapper.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = STEPBridgeWrapper.h; sourceTree = "<group>"; };
+		A2000020 /* STEPBridgeWrapper.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = STEPBridgeWrapper.m; sourceTree = "<group>"; };
+		A2000021 /* CutPresetManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CutPresetManager.swift; sourceTree = "<group>"; };
+		A2000022 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A2000032 /* GCodeGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GCodeGeneratorTests.swift; sourceTree = "<group>"; };
+		A2000033 /* STEPBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STEPBridgeTests.swift; sourceTree = "<group>"; };
+		A2000034 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
+		A2000035 /* FeatureDetectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureDetectionTests.swift; sourceTree = "<group>"; };
+		A2000036 /* FixtureGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureGeneratorTests.swift; sourceTree = "<group>"; };
+		A3000001 /* pipe-macos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "pipe-macos.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A3000002 /* pipe-macosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "pipe-macosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		42D7135A2F6CB81C00932D0D /* examples */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = examples; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A4000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A4000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000034 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		304213ACE877C98BA3A18BA2 /* IR */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = IR;
+			sourceTree = "<group>";
+		};
+		42D2954C2F71F024009B1263 /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				A2000034 /* XCTest.framework */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
+		A5000001 = {
+			isa = PBXGroup;
+			children = (
+				A5000002 /* pipe-macos */,
+				A5000006 /* pipe-macosTests */,
+				A5000003 /* Products */,
+				42D2954C2F71F024009B1263 /* Recovered References */,
+			);
+			sourceTree = "<group>";
+		};
+		A5000002 /* pipe-macos */ = {
+			isa = PBXGroup;
+			children = (
+				42D714552F6F578500932D0D /* CODEREVIEW.md */,
+				42D714532F6F401000932D0D /* IMPROVEMENTS.md */,
+				42D714512F6F3FA000932D0D /* RESEARCH.md */,
+				42D713732F6E187A00932D0D /* GOALS.md */,
+				42D713672F6DACA900932D0D /* CONSTRAINTS.md */,
+				42D7135A2F6CB81C00932D0D /* examples */,
+				A5000004 /* Bridge */,
+				A2000004 /* pipe_macosApp.swift */,
+				A2000001 /* AppDelegate.swift */,
+				A2000002 /* ContentView.swift */,
+				A2000005 /* Model3DView.swift */,
+				A2000006 /* ModelLoader.swift */,
+				A2000007 /* ShapeSelector.swift */,
+				A2000021 /* CutPresetManager.swift */,
+				A2000022 /* SettingsView.swift */,
+				A2000003 /* Assets.xcassets */,
+				42D713402F6CB31900932D0D /* pipe-macos-Bridging-Header.h */,
+				42D713412F6CB34F00932D0D /* OCCT_SETUP.md */,
+				42D713432F6CB36500932D0D /* verify_occt.sh */,
+				42D7135D2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md */,
+				304213ACE877C98BA3A18BA2 /* IR */,
+				2D88B36FAF85A83852AF0854 /* GCodeGenerator.swift */,
+			);
+			path = "pipe-macos";
+			sourceTree = "<group>";
+		};
+		A5000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A3000001 /* pipe-macos.app */,
+				A3000002 /* pipe-macosTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A5000004 /* Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				A2000009 /* STEPBridge.h */,
+				A200000A /* STEPBridge.mm */,
+				A200001F /* STEPBridgeWrapper.h */,
+				A2000020 /* STEPBridgeWrapper.m */,
+				42D7134B2F6CB41E00932D0D /* OpenCASCADE.xcconfig */,
+				42D7134D2F6CB47900932D0D /* verify_occt.sh */,
+				42D713552F6CB50200932D0D /* pipe-macos-Bridging-Header.h */,
+				42D713562F6CB54100932D0D /* SETUP_GUIDE.md */,
+				42D713582F6CB56D00932D0D /* START_HERE.md */,
+			);
+			path = Bridge;
+			sourceTree = "<group>";
+		};
+		A5000006 /* pipe-macosTests */ = {
+			isa = PBXGroup;
+			children = (
+				A2000032 /* GCodeGeneratorTests.swift */,
+				A2000033 /* STEPBridgeTests.swift */,
+				A2000035 /* FeatureDetectionTests.swift */,
+				A2000036 /* FixtureGeneratorTests.swift */,
+			);
+			path = "pipe-macosTests";
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A6000001 /* pipe-macos */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A7000001 /* Build configuration list for PBXNativeTarget "pipe-macos" */;
+			buildPhases = (
+				A8000001 /* Sources */,
+				A4000001 /* Frameworks */,
+				A8000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				42D7135A2F6CB81C00932D0D /* examples */,
+			);
+			name = "pipe-macos";
+			productName = "pipe-macos";
+			productReference = A3000001 /* pipe-macos.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A6000002 /* pipe-macosTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A7000003 /* Build configuration list for PBXNativeTarget "pipe-macosTests" */;
+			buildPhases = (
+				A8000003 /* Sources */,
+				A4000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A9000003 /* PBXTargetDependency */,
+			);
+			name = "pipe-macosTests";
+			productName = "pipe-macosTests";
+			productReference = A3000002 /* pipe-macosTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A9000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					A6000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					A6000002 = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = A6000001;
+					};
+				};
+			};
+			buildConfigurationList = A7000002 /* Build configuration list for PBXProject "pipe-macos" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A5000001;
+			productRefGroup = A5000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A6000001 /* pipe-macos */,
+				A6000002 /* pipe-macosTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A8000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				42D7134C2F6CB41E00932D0D /* OpenCASCADE.xcconfig in Resources */,
+				A1000003 /* Assets.xcassets in Resources */,
+				42D7135E2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md in Resources */,
+				42D713592F6CB56D00932D0D /* START_HERE.md in Resources */,
+				42D713572F6CB54100932D0D /* SETUP_GUIDE.md in Resources */,
+				42D7134E2F6CB47900932D0D /* verify_occt.sh in Resources */,
+				42D713422F6CB34F00932D0D /* OCCT_SETUP.md in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A8000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A100000A /* STEPBridge.mm in Sources */,
+				A100001F /* STEPBridgeWrapper.m in Sources */,
+				A1000004 /* pipe_macosApp.swift in Sources */,
+				A1000001 /* AppDelegate.swift in Sources */,
+				A1000002 /* ContentView.swift in Sources */,
+				A1000005 /* Model3DView.swift in Sources */,
+				A1000006 /* ModelLoader.swift in Sources */,
+				A1000007 /* ShapeSelector.swift in Sources */,
+				A1000020 /* CutPresetManager.swift in Sources */,
+				A1000021 /* SettingsView.swift in Sources */,
+				505BE73B3277D1530180D6E0 /* GCodeGenerator.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A8000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000032 /* GCodeGeneratorTests.swift in Sources */,
+				A1000033 /* STEPBridgeTests.swift in Sources */,
+				A1000035 /* FeatureDetectionTests.swift in Sources */,
+				A1000036 /* FixtureGeneratorTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A9000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A6000001 /* pipe-macos */;
+			targetProxy = A9000002 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		AB000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"HAVE_OCCT=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(OCCT_PREFIX)/include/opencascade",
+					"$(inherited)",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"$(OCCT_PREFIX)/lib",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(OCCT_PREFIX)/lib",
+					"$(inherited)",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				MTL_GENERATE_DEBUG_INFO = YES;
+				"OCCT_PREFIX[arch=arm64]" = /opt/homebrew/opt/opencascade;
+				"OCCT_PREFIX[arch=x86_64]" = /usr/local/opt/opencascade;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lTKernel",
+					"-lTKMath",
+					"-lTKMesh",
+					"-lTKG3d",
+					"-lTKG2d",
+					"-lTKGeomBase",
+					"-lTKGeomAlgo",
+					"-lTKBRep",
+					"-lTKPrim",
+					"-lTKTopAlgo",
+					"-lTKShHealing",
+					"-lTKXSBase",
+					"-lTKCDF",
+					"-lTKLCAF",
+					"-lTKCAF",
+					"-lTKVCAF",
+					"-lTKXCAF",
+					"-lTKDE",
+					"-lTKDESTEP",
+				);
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AB000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"HAVE_OCCT=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(OCCT_PREFIX)/include/opencascade",
+					"$(inherited)",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(OCCT_PREFIX)/lib",
+					"$(inherited)",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				MTL_GENERATE_DEBUG_INFO = NO;
+				"OCCT_PREFIX[arch=arm64]" = /opt/homebrew/opt/opencascade;
+				"OCCT_PREFIX[arch=x86_64]" = /usr/local/opt/opencascade;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lTKernel",
+					"-lTKMath",
+					"-lTKMesh",
+					"-lTKG3d",
+					"-lTKG2d",
+					"-lTKGeomBase",
+					"-lTKGeomAlgo",
+					"-lTKBRep",
+					"-lTKPrim",
+					"-lTKTopAlgo",
+					"-lTKShHealing",
+					"-lTKXSBase",
+					"-lTKCDF",
+					"-lTKLCAF",
+					"-lTKCAF",
+					"-lTKVCAF",
+					"-lTKXCAF",
+					"-lTKDE",
+					"-lTKDESTEP",
+				);
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		AC000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "pipe-macos/pipe-macos.entitlements";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R339VM6KXL;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(OCCT_PREFIX)/lib",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.pipe-macos";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/pipe-macos/pipe-macos-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		AC000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "pipe-macos/pipe-macos.entitlements";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R339VM6KXL;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(OCCT_PREFIX)/lib",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.pipe-macos";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/pipe-macos/pipe-macos-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		AC000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R339VM6KXL;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.pipe-macosTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/pipe-macos.app/Contents/MacOS/pipe-macos";
+			};
+			name = Debug;
+		};
+		AC000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = R339VM6KXL;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.example.pipe-macosTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/pipe-macos.app/Contents/MacOS/pipe-macos";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A7000001 /* Build configuration list for PBXNativeTarget "pipe-macos" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AC000001 /* Debug */,
+				AC000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A7000002 /* Build configuration list for PBXProject "pipe-macos" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AB000001 /* Debug */,
+				AB000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A7000003 /* Build configuration list for PBXNativeTarget "pipe-macosTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AC000003 /* Debug */,
+				AC000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A9000001 /* Project object */;
+}
