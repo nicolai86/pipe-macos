@@ -20,10 +20,11 @@ struct KinematicsEngine {
     ///   relative to this value (used in pack mode to maintain inter-feature continuity).
     ///   Pass `nil` in single-piece mode — the 2D shift in `ToolpathPlanner` handles continuity.
     func convert(
-        path: PlannedPath,
+        plannedFeature: PlannedFeature,
         stock: StockInfo,
         initialMachineAm: CGFloat?
     ) -> [MachinePoint] {
+        let path = plannedFeature.plannedPath
         guard !path.points.isEmpty else { return [] }
 
         let rawPoints = tcpConvert(path: path, stock: stock, initialMachineAm: initialMachineAm)

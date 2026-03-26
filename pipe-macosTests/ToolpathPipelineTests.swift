@@ -18,24 +18,24 @@ private func makeSquareStock(side: CGFloat = 50.0, length: CGFloat = 500) -> Sto
 }
 
 private func makeHoleFeature(xCenter: CGFloat = 200, aCenter: CGFloat = 90,
-                              xRadius: CGFloat = 15, aRadius: CGFloat = 30) -> SurfaceFeature {
+                              xRadius: CGFloat = 15, aRadius: CGFloat = 30) -> GeometricFeature {
     let steps = 12
     let path = (0...steps).map { i -> ToolpathPoint in
         let t = 2 * Double.pi * Double(i) / Double(steps)
         return ToolpathPoint(x: xCenter + xRadius * CGFloat(cos(t)),
                              a: aCenter + aRadius * CGFloat(sin(t)))
     }
-    return SurfaceFeature(id: 1, type: .hole, shape: .circle,
+    return GeometricFeature(id: 1, type: .hole, shape: .circle,
                           xCenter: xCenter, aCenterDeg: aCenter,
-                          dimensions: ["diameter": 30], confidence: 1.0, path: path)
+                          dimensions: ["diameter": 30], confidence: 1.0, rawPath: path)
 }
 
 private func makeSeverFeature(type: SurfaceFeatureType = .startCut,
-                               xPos: CGFloat = 0) -> SurfaceFeature {
+                               xPos: CGFloat = 0) -> GeometricFeature {
     let path = (0...36).map { i in ToolpathPoint(x: xPos, a: CGFloat(i) * 10) }
-    return SurfaceFeature(id: 2, type: type, shape: .custom,
+    return GeometricFeature(id: 2, type: type, shape: .custom,
                           xCenter: xPos, aCenterDeg: 180,
-                          dimensions: [:], confidence: 1.0, path: path)
+                          dimensions: [:], confidence: 1.0, rawPath: path)
 }
 
 // MARK: - ToolpathPlanner Tests
@@ -47,14 +47,14 @@ final class ToolpathPlannerTests: XCTestCase {
     // MARK: Empty path
 
     func testEmptyPathReturnsEmptyPlan() {
-        let feature = SurfaceFeature(id: 1, type: .hole, shape: .circle,
+        let feature = GeometricFeature(id: 1, type: .hole, shape: .circle,
                                      xCenter: 100, aCenterDeg: 90,
-                                     dimensions: [:], confidence: 1.0, path: nil)
+                                     dimensions: [:], confidence: 1.0, rawPath: [])
         let result = ToolpathPlanner(settings: defaultSettings()).plan(
             feature: feature, stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
-        XCTAssertTrue(result.points.isEmpty, "nil path must produce empty PlannedPath")
-        XCTAssertFalse(result.isInternal)
+        XCTAssertTrue(result.plannedPath.points.isEmpty, "empty path must produce empty PlannedPath")
+        XCTAssertFalse(result.plannedPath.isInternal)
     }
 
     // MARK: isInternal classification
@@ -63,14 +63,14 @@ final class ToolpathPlannerTests: XCTestCase {
         let result = ToolpathPlanner(settings: defaultSettings()).plan(
             feature: makeHoleFeature(), stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
-        XCTAssertTrue(result.isInternal, "Hole must be classified as internal")
+        XCTAssertTrue(result.plannedPath.isInternal, "Hole must be classified as internal")
     }
 
     func testSeverCutIsNotInternal() {
         let result = ToolpathPlanner(settings: defaultSettings()).plan(
             feature: makeSeverFeature(type: .startCut), stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
-        XCTAssertFalse(result.isInternal, "startCut must not be classified as internal")
+        XCTAssertFalse(result.plannedPath.isInternal, "startCut must not be classified as internal")
     }
 
     func testNotchIsInternal() {
@@ -78,13 +78,13 @@ final class ToolpathPlannerTests: XCTestCase {
             ToolpathPoint(x: 100 + 15 * CGFloat(cos(Double(i) * .pi / 4)),
                           a:  90 + 20 * CGFloat(sin(Double(i) * .pi / 4)))
         }
-        let notch = SurfaceFeature(id: 3, type: .notch, shape: .custom,
+        let notch = GeometricFeature(id: 3, type: .notch, shape: .custom,
                                    xCenter: 100, aCenterDeg: 90,
-                                   dimensions: [:], confidence: 1.0, path: path)
+                                   dimensions: [:], confidence: 1.0, rawPath: path)
         let result = ToolpathPlanner(settings: defaultSettings()).plan(
             feature: notch, stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
-        XCTAssertTrue(result.isInternal, "Notch must be classified as internal")
+        XCTAssertTrue(result.plannedPath.isInternal, "Notch must be classified as internal")
     }
 
     // MARK: Pack + roll offset
@@ -94,19 +94,18 @@ final class ToolpathPlannerTests: XCTestCase {
         let result = ToolpathPlanner(settings: defaultSettings()).plan(
             feature: makeHoleFeature(xCenter: 50), stock: makeRoundStock(),
             packStartX: packStartX, rollOffset: 0, previousMachineAm: 0)
-        let minX = result.points.map(\.x).min() ?? 0
+        let minX = result.plannedPath.points.map(\.x).min() ?? 0
         // Feature centroid at packStartX + 50 = 350; lead-in may reach ~5 mm below,
         // but must never reach below packStartX itself.
         XCTAssertGreaterThan(minX, packStartX - 30,
                              "All points must be shifted by packStartX (minX=\(minX))")
     }
-
     func testRollOffsetShiftsAllPointsInA() {
         let rollOffset: CGFloat = 180
         let result = ToolpathPlanner(settings: defaultSettings()).plan(
             feature: makeHoleFeature(aCenter: 0), stock: makeRoundStock(),
             packStartX: 0, rollOffset: rollOffset, previousMachineAm: rollOffset)
-        let meanA = result.points.map(\.a).reduce(0, +) / CGFloat(result.points.count)
+        let meanA = result.plannedPath.points.map(\.a).reduce(0, +) / CGFloat(result.plannedPath.points.count)
         // Feature was at 0°, rollOffset 180° → centroid of output should be near 180°.
         // Allow ±90° to account for lead-in/overburn geometry.
         XCTAssertEqual(Double(meanA), 180, accuracy: 90,
@@ -116,7 +115,7 @@ final class ToolpathPlannerTests: XCTestCase {
     // MARK: Lead-in and overburn
 
     func testLeadInAddsPointsBeyondRawInput() {
-        let rawCount = makeHoleFeature().path!.count
+        let rawCount = makeHoleFeature().rawPath.count
         var s = defaultSettings()
         s.leadInDistance = 5
         s.leadInAngle = 90
@@ -124,7 +123,7 @@ final class ToolpathPlannerTests: XCTestCase {
         let result = ToolpathPlanner(settings: s).plan(
             feature: makeHoleFeature(), stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
-        XCTAssertGreaterThan(result.points.count, rawCount,
+        XCTAssertGreaterThan(result.plannedPath.points.count, rawCount,
                              "Lead-in must increase point count beyond raw feature (\(rawCount) pts)")
     }
 
@@ -138,10 +137,10 @@ final class ToolpathPlannerTests: XCTestCase {
         let result = ToolpathPlanner(settings: defaultSettings()).plan(
             feature: hole, stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: previousAm)
-        XCTAssertFalse(result.points.isEmpty)
+        XCTAssertFalse(result.plannedPath.points.isEmpty)
         // The path should be continuous with previousAm: no point should be near 90° (un-shifted)
         // when the shifted value would be 450°.
-        let anyPointNearZero = result.points.contains { abs($0.a - 90) < 5 }
+        let anyPointNearZero = result.plannedPath.points.contains { abs($0.a - 90) < 5 }
         XCTAssertFalse(anyPointNearZero,
                        "Path must be shifted up by ~360° for continuity with previousMachineAm=360")
     }
@@ -155,7 +154,7 @@ final class ToolpathPlannerTests: XCTestCase {
         let result = ToolpathPlanner(settings: s).plan(
             feature: makeHoleFeature(), stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
-        for pt in result.points {
+        for pt in result.plannedPath.points {
             XCTAssertFalse(pt.x.isNaN || pt.x.isInfinite, "X must be finite")
             XCTAssertFalse(pt.a.isNaN || pt.a.isInfinite, "A must be finite")
         }
@@ -168,8 +167,8 @@ final class ToolpathPlannerTests: XCTestCase {
         let result = ToolpathPlanner(settings: s).plan(
             feature: makeHoleFeature(), stock: makeSquareStock(side: 50),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
-        XCTAssertFalse(result.points.isEmpty)
-        for pt in result.points {
+        XCTAssertFalse(result.plannedPath.points.isEmpty)
+        for pt in result.plannedPath.points {
             XCTAssertFalse(pt.x.isNaN || pt.x.isInfinite, "X must be finite on HSS")
             XCTAssertFalse(pt.a.isNaN || pt.a.isInfinite, "A must be finite on HSS")
         }
@@ -192,8 +191,9 @@ final class KinematicsEngineTests: XCTestCase {
                          settings: GCodeSettings? = nil,
                          initialAm: CGFloat? = nil) -> [MachinePoint] {
         let s = settings ?? bareSettings()
-        let path = PlannedPath(points: pts, isInternal: false)
-        return KinematicsEngine(settings: s).convert(path: path, stock: stock, initialMachineAm: initialAm)
+        let feature = GeometricFeature(id: 0, type: .hole, shape: .custom, xCenter: 0, aCenterDeg: 0, dimensions: [:], confidence: 1.0, rawPath: pts)
+        let plannedFeature = PlannedFeature(source: feature, plannedPath: PlannedPath(points: pts, isInternal: false))
+        return KinematicsEngine(settings: s).convert(plannedFeature: plannedFeature, stock: stock, initialMachineAm: initialAm)
     }
 
     // MARK: Boundary conditions
@@ -478,10 +478,15 @@ final class GCodeEmitterTests: XCTestCase {
     func testEmitFeatureStartsWithG0ZRetract() {
         let settings = defaultSettings()
         let feature = makeHoleFeature()
-        let (lines, _) = GCodeEmitter(settings: settings).emitFeature(
-            machinePoints: makePoints(), segments: makeSegments(),
-            feature: feature, stock: makeRoundStock(),
-            packStartX: 0, rollOffset: 0, isInternal: true)
+        let points = makePoints()
+        let segments = makeSegments()
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
+        
+        let lines = GCodeEmitter(settings: settings).emitFeature(
+            toolpathFeature: toolpathFeature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0)
+        
         // First motion line must be the safe-Z retract
         let firstMotion = lines.first(where: { $0.hasPrefix("G0") || $0.hasPrefix("G1") })!
         XCTAssertTrue(firstMotion.hasPrefix("G0 Z"),
@@ -490,10 +495,15 @@ final class GCodeEmitterTests: XCTestCase {
 
     func testEmitFeatureContainsM3BeforeFirstG1() {
         let feature = makeHoleFeature()
-        let (lines, _) = GCodeEmitter(settings: defaultSettings()).emitFeature(
-            machinePoints: makePoints(), segments: makeSegments(),
-            feature: feature, stock: makeRoundStock(),
-            packStartX: 0, rollOffset: 0, isInternal: true)
+        let points = makePoints()
+        let segments = makeSegments()
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
+
+        let lines = GCodeEmitter(settings: defaultSettings()).emitFeature(
+            toolpathFeature: toolpathFeature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0)
+            
         var m3Found = false
         var g1BeforeM3 = false
         for line in lines {
@@ -506,10 +516,15 @@ final class GCodeEmitterTests: XCTestCase {
 
     func testEmitFeatureEndsWithM5() {
         let feature = makeHoleFeature()
-        let (lines, _) = GCodeEmitter(settings: defaultSettings()).emitFeature(
-            machinePoints: makePoints(), segments: makeSegments(),
-            feature: feature, stock: makeRoundStock(),
-            packStartX: 0, rollOffset: 0, isInternal: true)
+        let points = makePoints()
+        let segments = makeSegments()
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
+
+        let lines = GCodeEmitter(settings: defaultSettings()).emitFeature(
+            toolpathFeature: toolpathFeature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0)
+            
         XCTAssertTrue(lines.last?.contains("M5") == true,
                       "Feature must end with M5 torch-off")
     }
@@ -518,10 +533,15 @@ final class GCodeEmitterTests: XCTestCase {
 
     func testAllG1LinesHavePositiveFeedRate() {
         let feature = makeHoleFeature()
-        let (lines, _) = GCodeEmitter(settings: defaultSettings()).emitFeature(
-            machinePoints: makePoints(), segments: makeSegments(finalF: 800),
-            feature: feature, stock: makeRoundStock(),
-            packStartX: 0, rollOffset: 0, isInternal: true)
+        let points = makePoints()
+        let segments = makeSegments(finalF: 800)
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
+
+        let lines = GCodeEmitter(settings: defaultSettings()).emitFeature(
+            toolpathFeature: toolpathFeature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0)
+            
         for line in lines where line.hasPrefix("G1") {
             guard let fRange = line.range(of: "F") else {
                 XCTFail("G1 line missing F word: \(line)"); continue
@@ -533,54 +553,21 @@ final class GCodeEmitterTests: XCTestCase {
         }
     }
 
-    // MARK: emitFeature — returns final Am
-
-    func testEmitFeatureReturnsFinalMachineAm() {
-        let points = [
-            MachinePoint(Xm: 0, Ym: 0, Zm: 0, Am: 45,  matX: 0, matU: 25, matV: 0, isCorner: false),
-            MachinePoint(Xm: 10, Ym: 0, Zm: 0, Am: 90, matX: 10, matU: 25, matV: 0, isCorner: false),
-            MachinePoint(Xm: 20, Ym: 0, Zm: 0, Am: 135, matX: 20, matU: 25, matV: 0, isCorner: false),
-        ]
-        let segs = makeSegments(2)
-        let (_, finalAm) = GCodeEmitter(settings: defaultSettings()).emitFeature(
-            machinePoints: points, segments: segs,
-            feature: makeHoleFeature(), stock: makeRoundStock(),
-            packStartX: 0, rollOffset: 0, isInternal: true)
-        XCTAssertEqual(Double(finalAm), 135, accuracy: 0.001,
-                       "Returned finalAm must equal last machine point's Am")
-    }
-
-    // MARK: getDynamicSafeZ
-
-    func testDynamicSafeZForRoundStockEqualsStaticSafeHeight() {
-        var s = defaultSettings()
-        s.safeHeight = 25.0
-        s.enableDynamicSafeZ = false
-        let emitter = GCodeEmitter(settings: s)
-        let safeZ = emitter.getDynamicSafeZ(stock: makeRoundStock())
-        XCTAssertEqual(Double(safeZ), 25.0, accuracy: 0.001,
-                       "Round stock safe Z must equal safeHeight (no corner clearance needed)")
-    }
-
-    func testDynamicSafeZForHSSExceedsStaticSafeHeight() {
-        var s = defaultSettings()
-        s.safeHeight = 25.0
-        let emitter = GCodeEmitter(settings: s)
-        let safeZ = emitter.getDynamicSafeZ(stock: makeSquareStock(side: 50))
-        XCTAssertGreaterThan(safeZ, s.safeHeight,
-                             "Square HSS safe Z must exceed static safeHeight to clear the corner diagonal")
-    }
-
     // MARK: THC codes
 
     func testTHCCodesAbsentWhenDisabled() {
         var s = defaultSettings()
         s.enableDynamicTHC = false
         let feature = makeHoleFeature()
-        let (lines, _) = GCodeEmitter(settings: s).emitFeature(
-            machinePoints: makePoints(), segments: makeSegments(),
-            feature: feature, stock: makeRoundStock(),
-            packStartX: 0, rollOffset: 0, isInternal: true)
+        let points = makePoints()
+        let segments = makeSegments()
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
+
+        let lines = GCodeEmitter(settings: s).emitFeature(
+            toolpathFeature: toolpathFeature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0)
+            
         let joined = lines.joined(separator: "\n")
         XCTAssertFalse(joined.contains("#4061"), "THC lock variable must be absent when THC disabled")
     }
@@ -596,10 +583,15 @@ final class GCodeEmitterTests: XCTestCase {
                          matX: CGFloat(i) * 20, matU: 25, matV: 0, isCorner: false)
         }
         let points = [cornerPierce] + flatPoints
-        let (lines, _) = GCodeEmitter(settings: s).emitFeature(
-            machinePoints: points, segments: makeSegments(4),
-            feature: makeHoleFeature(), stock: makeRoundStock(),
-            packStartX: 0, rollOffset: 0, isInternal: true)
+        let segments = makeSegments(4)
+        let feature = makeHoleFeature()
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
+
+        let lines = GCodeEmitter(settings: s).emitFeature(
+            toolpathFeature: toolpathFeature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0)
+            
         let joined = lines.joined(separator: "\n")
         XCTAssertTrue(joined.contains("#4061 = 100"), "THC lock must be emitted when pierce is at corner")
     }

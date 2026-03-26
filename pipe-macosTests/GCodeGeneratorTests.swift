@@ -50,19 +50,19 @@ final class GCodeGeneratorTests: XCTestCase {
     }
 
     /// Full-circumference sever cut (startCut / endCut) at a fixed X.
-    private func makeSeverCut(type: SurfaceFeatureType, xPos: CGFloat, id: Int = 1) -> SurfaceFeature {
+    private func makeSeverCut(type: SurfaceFeatureType, xPos: CGFloat, id: Int = 1) -> GeometricFeature {
         let path = (0...36).map { i -> ToolpathPoint in
             ToolpathPoint(x: xPos, a: CGFloat(i) * 10.0)
         }
-        return SurfaceFeature(
+        return GeometricFeature(
             id: id, type: type, shape: .custom,
             xCenter: xPos, aCenterDeg: 180,
-            dimensions: ["width": 0], confidence: 1.0, path: path
+            dimensions: ["width": 0], confidence: 1.0, rawPath: path
         )
     }
 
     /// Simple elliptical hole centred at (xCenter, aCenter).
-    private func makeHole(id: Int, xCenter: CGFloat, aCenter: CGFloat = 90.0) -> SurfaceFeature {
+    private func makeHole(id: Int, xCenter: CGFloat, aCenter: CGFloat = 90.0) -> GeometricFeature {
         let steps = 8
         var path: [ToolpathPoint] = []
         for i in 0...steps {
@@ -72,10 +72,10 @@ final class GCodeGeneratorTests: XCTestCase {
                 a: aCenter  + CGFloat(45.0 * sin(t))
             ))
         }
-        return SurfaceFeature(
+        return GeometricFeature(
             id: id, type: .hole, shape: .circle,
             xCenter: xCenter, aCenterDeg: aCenter,
-            dimensions: ["diameter": 30], confidence: 1.0, path: path
+            dimensions: ["diameter": 30], confidence: 1.0, rawPath: path
         )
     }
 
@@ -555,10 +555,10 @@ final class GCodeGeneratorTests: XCTestCase {
             let t = CGFloat(i) / CGFloat(steps)
             path.append(ToolpathPoint(x: xStart + t * (xEnd - xStart), a: 0))
         }
-        let feature = SurfaceFeature(
+        let feature = GeometricFeature(
             id: 1, type: .hole, shape: .custom,
             xCenter: (xStart + xEnd) / 2.0, aCenterDeg: 0,
-            dimensions: ["length": xEnd - xStart], confidence: 1.0, path: path
+            dimensions: ["length": xEnd - xStart], confidence: 1.0, rawPath: path
         )
         stock.features.append(feature)
         
@@ -755,5 +755,95 @@ final class GCodeGeneratorTests: XCTestCase {
         }
         
         XCTAssertEqual(featuresChecked, 4, "Expected to check 4 features on flat faces, but checked \(featuresChecked)")
+    }
+}
+
+// MARK: - featureType Classification Tests
+
+/// Unit tests for ModelLoader.featureType — specifically the complex-end-profile gap
+/// where a full-profile (360°) loop whose shallowest point is a few mm beyond axisTol
+/// was previously misclassified as .cutout.
+final class FeatureTypeClassificationTests: XCTestCase {
+
+    private let axisTol: Float = 2.0
+
+    // MARK: Simple sever cuts (existing behaviour — must not regress)
+
+    func testSimpleStartCutAtTubeOrigin() {
+        // loopMinX = 0 → squarely within axisTol → .startCut
+        let result = ModelLoader.featureType(
+            loopMinX: 0, loopMaxX: 0.5, tubeLength: 500, isFullProfile: true, axisTol: axisTol)
+        XCTAssertEqual(result, .startCut, "Flat cut at tube origin must be startCut")
+    }
+
+    func testSimpleEndCutAtTubeFar() {
+        // loopMaxX = tubeLength → .endCut
+        let result = ModelLoader.featureType(
+            loopMinX: 499.5, loopMaxX: 500, tubeLength: 500, isFullProfile: true, axisTol: axisTol)
+        XCTAssertEqual(result, .endCut, "Flat cut at tube far end must be endCut")
+    }
+
+    // MARK: Complex end profile (the bug under fix)
+
+    func testComplexStartCutJustBeyondAxisTol() {
+        // loopMinX = 3 mm — beyond axisTol (2 mm) but well within complexEndTol (10 mm).
+        // This is the geometry produced by a round tube intersected with an HSS tube at the end:
+        // the shallowest point of the intersection may be ~3-5 mm from the tube end.
+        let result = ModelLoader.featureType(
+            loopMinX: 3, loopMaxX: 23, tubeLength: 514, isFullProfile: true, axisTol: axisTol)
+        XCTAssertEqual(result, .startCut,
+            "Complex end profile (loopMinX=3mm > axisTol) must still be classified as startCut")
+    }
+
+    func testComplexStartCutAtFiveMm() {
+        // loopMinX = 5 mm — the user-reported case ("<5mm on one side")
+        let result = ModelLoader.featureType(
+            loopMinX: 4.5, loopMaxX: 23, tubeLength: 514, isFullProfile: true, axisTol: axisTol)
+        XCTAssertEqual(result, .startCut,
+            "Complex end profile with 4.5mm minimum depth must be classified as startCut, not cutout")
+    }
+
+    func testComplexEndCutJustBeyondAxisTol() {
+        // Mirror case for endCut: loopMaxX = tubeLength - 3 mm
+        let tubeLength: Float = 514
+        let result = ModelLoader.featureType(
+            loopMinX: tubeLength - 23, loopMaxX: tubeLength - 3,
+            tubeLength: tubeLength, isFullProfile: true, axisTol: axisTol)
+        XCTAssertEqual(result, .endCut,
+            "Complex end profile near tube far end must be classified as endCut")
+    }
+
+    // MARK: Guard: full-profile feature in the middle of the tube must NOT become a sever cut
+
+    func testFullProfileMidTubeRemainsNonSever() {
+        // A hypothetical full-profile loop that is centered in the middle of the tube.
+        // It should NOT be promoted to startCut/endCut by the complexEndTol branch.
+        let result = ModelLoader.featureType(
+            loopMinX: 200, loopMaxX: 230, tubeLength: 514, isFullProfile: true, axisTol: axisTol)
+        XCTAssertEqual(result, .cutout,
+            "Full-profile loop in the middle of the tube must remain .cutout, not sever")
+    }
+
+    func testFullProfileNearStartButTooDeepRemainsNonSever() {
+        // loopMinX = 5 mm (within complexEndTol) BUT loopMaxX = 200 mm (> 25% of 514 mm = 128.5 mm).
+        // The feature spans too much of the tube to be an end profile.
+        let result = ModelLoader.featureType(
+            loopMinX: 5, loopMaxX: 200, tubeLength: 514, isFullProfile: true, axisTol: axisTol)
+        XCTAssertEqual(result, .cutout,
+            "Full-profile loop that extends deep into the tube must not be misclassified as startCut")
+    }
+
+    // MARK: Notch and cutout (non-full-profile — must not regress)
+
+    func testNotchTouchingStart() {
+        let result = ModelLoader.featureType(
+            loopMinX: 0, loopMaxX: 30, tubeLength: 500, isFullProfile: false, axisTol: axisTol)
+        XCTAssertEqual(result, .notch, "Partial loop touching start must be .notch")
+    }
+
+    func testCutoutInMiddle() {
+        let result = ModelLoader.featureType(
+            loopMinX: 200, loopMaxX: 230, tubeLength: 500, isFullProfile: false, axisTol: axisTol)
+        XCTAssertEqual(result, .cutout, "Partial loop not touching either end must be .cutout")
     }
 }

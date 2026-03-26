@@ -59,7 +59,7 @@ class StockInfo: Codable {
     /// Used in pack view to roll all pieces to the same orientation.
     var uAxis: SIMD3<Float>
     var origin: SIMD3<Float>
-    var features: [SurfaceFeature] = []
+    var features: [GeometricFeature] = []
     /// Face-to-face distance in the uAxis direction (= vertical extent toward torch after roll alignment).
     /// Nil for round stock. For HSS-Rect/Square: vertDim = uAxisDimension, horizDim = (odX+odY) - uAxisDimension.
     var uAxisDimension: CGFloat?
@@ -71,7 +71,7 @@ class StockInfo: Codable {
 
 struct ToolpathPoint: Codable { var x: CGFloat; var a: CGFloat }
 
-struct SurfaceFeature: Codable, Identifiable {
+struct GeometricFeature: Codable, Identifiable {
     var id: Int
     var type: SurfaceFeatureType
     var shape: FeatureShape
@@ -79,7 +79,7 @@ struct SurfaceFeature: Codable, Identifiable {
     var aCenterDeg: CGFloat
     var dimensions: [String: CGFloat]
     var confidence: Float
-    var path: [ToolpathPoint]?
+    var rawPath: [ToolpathPoint]
 }
 
 struct Mesh3D {
@@ -626,10 +626,10 @@ class ModelLoader {
             while aCenter >= 360.0 { aCenter -= 360.0 }
             while aCenter < 0.0    { aCenter += 360.0 }
 
-            let feature = SurfaceFeature(
+            let feature = GeometricFeature(
                 id: featureId, type: type, shape: .rectangle,
                 xCenter: xCenter, aCenterDeg: aCenter,
-                dimensions: ["width": width], confidence: 1.0, path: unwrappedPath
+                dimensions: ["width": width], confidence: 1.0, rawPath: unwrappedPath
             )
             stockInfo.features.append(feature)
             featureId += 1

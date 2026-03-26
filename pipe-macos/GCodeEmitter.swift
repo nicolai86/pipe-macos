@@ -12,15 +12,18 @@ struct GCodeEmitter {
     // MARK: - Feature Emission
 
     func emitFeature(
-        machinePoints: [MachinePoint],
-        segments: [TrajectorySegment],
-        feature: SurfaceFeature,
+        toolpathFeature: ToolpathFeature,
         stock: StockInfo,
         packStartX: CGFloat,
-        rollOffset: CGFloat,
-        isInternal: Bool
-    ) -> ([String], CGFloat) {
-        guard !machinePoints.isEmpty else { return ([], 0) }
+        rollOffset: CGFloat
+    ) -> [String] {
+        let machinePoints = toolpathFeature.machinePoints
+        let segments = toolpathFeature.segments
+        let plannedFeature = toolpathFeature.source
+        let feature = plannedFeature.source
+        let isInternal = plannedFeature.plannedPath.isInternal
+
+        guard !machinePoints.isEmpty else { return [] }
 
         var lines: [String] = []
         let typeStr = feature.type.rawValue.capitalized
@@ -64,7 +67,7 @@ struct GCodeEmitter {
         }
         lines.append("M5; G0 Z\(fmtU(dynamicSafeZ))")
 
-        return (lines, machinePoints.last!.Am)
+        return lines
     }
 
     // MARK: - Program Structure

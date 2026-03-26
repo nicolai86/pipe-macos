@@ -25,12 +25,12 @@
 		A1000021 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000022 /* SettingsView.swift */; };
 		A1000032 /* GCodeGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000032 /* GCodeGeneratorTests.swift */; };
 		A1000033 /* STEPBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000033 /* STEPBridgeTests.swift */; };
-		AC000010 /* ToolpathPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC000011 /* ToolpathPipelineTests.swift */; };
 		A1000034 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000034 /* XCTest.framework */; };
 		AA000001AA000001AA000001 /* ToolpathPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002AA000002AA000002 /* ToolpathPlanner.swift */; };
 		AA000003AA000003AA000003 /* KinematicsEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000004AA000004AA000004 /* KinematicsEngine.swift */; };
 		AA000005AA000005AA000005 /* VelocityProfiler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000006AA000006AA000006 /* VelocityProfiler.swift */; };
 		AA000007AA000007AA000007 /* GCodeEmitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000008AA000008AA000008 /* GCodeEmitter.swift */; };
+		AC000010 /* ToolpathPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC000011 /* ToolpathPipelineTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,7 +68,6 @@
 		A2000022 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A2000032 /* GCodeGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GCodeGeneratorTests.swift; sourceTree = "<group>"; };
 		A2000033 /* STEPBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STEPBridgeTests.swift; sourceTree = "<group>"; };
-		AC000011 /* ToolpathPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolpathPipelineTests.swift; sourceTree = "<group>"; };
 		A2000034 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
 		A3000001 /* pipe-macos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "pipe-macos.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000002 /* pipe-macosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "pipe-macosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -76,6 +75,7 @@
 		AA000004AA000004AA000004 /* KinematicsEngine.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KinematicsEngine.swift; sourceTree = "<group>"; };
 		AA000006AA000006AA000006 /* VelocityProfiler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VelocityProfiler.swift; sourceTree = "<group>"; };
 		AA000008AA000008AA000008 /* GCodeEmitter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GCodeEmitter.swift; sourceTree = "<group>"; };
+		AC000011 /* ToolpathPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolpathPipelineTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */

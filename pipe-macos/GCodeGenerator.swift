@@ -17,7 +17,7 @@ struct PackEntry {
 
 /// A surface feature resolved into pack (global) coordinates, used by the thermal-hedging sequencer.
 struct GlobalFeature {
-    let feature: SurfaceFeature
+    let feature: GeometricFeature
     let stock: StockInfo
     /// X offset of the owning piece's low-X end in pack space (mm).
     let packStartX: CGFloat
@@ -188,6 +188,13 @@ struct TrajectorySegment {
     var finalF: CGFloat = 0.0
 }
 
+/// A feature that has been through planning, kinematics, and velocity profiling.
+struct ToolpathFeature {
+    let source: PlannedFeature
+    let machinePoints: [MachinePoint]
+    let segments: [TrajectorySegment]
+}
+
 // MARK: - GCode Generator
 
 class GCodeGenerator {
@@ -235,14 +242,16 @@ class GCodeGenerator {
         }
 
         for gf in orderedFeatures {
-            let (toolpath, finalA) = generateTCPToolpath(
+            let result = generateTCPToolpath(
                 feature: gf.feature, stock: gf.stock,
                 packStartX: gf.packStartX, rollOffset: gf.rollOffset,
                 currentA: currentA, isPackMode: false
             )
-            gcode.append(contentsOf: toolpath)
+            gcode.append(contentsOf: result.gcode)
             gcode.append("")
-            currentA = finalA
+            if let last = result.feature.machinePoints.last {
+                currentA = last.Am
+            }
         }
 
         gcode.append(contentsOf: emitter.emitEnd(stock: stock))
@@ -317,14 +326,16 @@ class GCodeGenerator {
 
             for gf in internals + severs {
                 lines.append("; ┌── Piece \(gf.pieceIndex + 1)/\(entries.count) | Feature: \(gf.feature.type.rawValue) at Global X=\(fmt(gf.globalX)) ──")
-                let (toolpath, finalA) = generateTCPToolpath(
+                let result = generateTCPToolpath(
                     feature: gf.feature, stock: gf.stock,
                     packStartX: gf.packStartX, rollOffset: gf.rollOffset,
                     currentA: currentA, isPackMode: true
                 )
-                lines += toolpath
+                lines += result.gcode
                 lines.append("")
-                currentA = finalA
+                if let last = result.feature.machinePoints.last {
+                    currentA = last.Am
+                }
             }
         } else {
             let ordered = entries.sorted { $0.packStartX > $1.packStartX }
@@ -339,14 +350,16 @@ class GCodeGenerator {
                         + "\(stock.features.count) feature\(stock.features.count == 1 ? "" : "s") ──",
                 ]
                 for feature in sortFeatures(stock.features) {
-                    let (toolpath, finalA) = generateTCPToolpath(
+                    let result = generateTCPToolpath(
                         feature: feature, stock: stock,
                         packStartX: entry.packStartX, rollOffset: rollOffset,
                         currentA: currentA, isPackMode: true
                     )
-                    lines += toolpath
+                    lines += result.gcode
                     lines.append("")
-                    currentA = finalA
+                    if let last = result.feature.machinePoints.last {
+                        currentA = last.Am
+                    }
                 }
             }
         }
@@ -380,31 +393,35 @@ class GCodeGenerator {
     // MARK: - TCP Toolpath (Orchestrator)
 
     private func generateTCPToolpath(
-        feature: SurfaceFeature,
+        feature: GeometricFeature,
         stock: StockInfo,
         packStartX: CGFloat,
         rollOffset: CGFloat,
         currentA: CGFloat,
         isPackMode: Bool
-    ) -> ([String], CGFloat) {
+    ) -> (gcode: [String], feature: ToolpathFeature) {
         let planned = ToolpathPlanner(settings: settings).plan(
             feature: feature, stock: stock,
             packStartX: packStartX, rollOffset: rollOffset,
             previousMachineAm: currentA
         )
-        guard !planned.points.isEmpty else { return ([], currentA) }
+        guard !planned.plannedPath.points.isEmpty else {
+            return ([], ToolpathFeature(source: planned, machinePoints: [], segments: []))
+        }
 
         let machines = KinematicsEngine(settings: settings).convert(
-            path: planned, stock: stock,
+            plannedFeature: planned, stock: stock,
             initialMachineAm: isPackMode ? currentA : nil
         )
         let segments = VelocityProfiler(settings: settings).profile(machinePoints: machines)
-        return GCodeEmitter(settings: settings).emitFeature(
-            machinePoints: machines, segments: segments,
-            feature: feature, stock: stock,
-            packStartX: packStartX, rollOffset: rollOffset,
-            isInternal: planned.isInternal
+        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: machines, segments: segments)
+        let gcode = GCodeEmitter(settings: settings).emitFeature(
+            toolpathFeature: toolpathFeature,
+            stock: stock,
+            packStartX: packStartX,
+            rollOffset: rollOffset
         )
+        return (gcode, toolpathFeature)
     }
 
     // MARK: - Thermal Hedging
@@ -448,7 +465,7 @@ class GCodeGenerator {
 
     // MARK: - Feature Sorting
 
-    private func sortFeatures(_ features: [SurfaceFeature]) -> [SurfaceFeature] {
+    private func sortFeatures(_ features: [GeometricFeature]) -> [GeometricFeature] {
         return features.sorted { a, b in
             func priority(_ t: SurfaceFeatureType) -> Int {
                 switch t {

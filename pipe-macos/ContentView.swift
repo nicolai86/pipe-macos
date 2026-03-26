@@ -468,7 +468,9 @@ class AppViewModel: ObservableObject {
 
         // Simulation uses all pieces laid out in one continuous sequence (visual approximation).
         let simEntries = makePackEntries(from: expanded, gap: gap)
-        let simCode = generator.generatePackGCode(entries: simEntries)
+        let simGenerator = GCodeGenerator()
+        simGenerator.settings = generator.settings
+        let simCode = simGenerator.generatePackGCode(entries: simEntries)
         simSegments = buildSimSegments(from: simCode)
         resetSim()
 

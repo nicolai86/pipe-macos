@@ -200,17 +200,16 @@ final class STEPBridgeTests: XCTestCase {
         // 1. Assert features
         XCTAssertEqual(stock.features.count, 3, "Expected 3 features (start/end + 1 cutout)")
         for (i, f) in stock.features.enumerated() {
-            print("FEATURE \(i): type=\(f.type) xCenter=\(f.xCenter) pathPoints=\(f.path?.count ?? 0)")
-            if let path = f.path {
-                var len = 0.0
-                for j in 1..<path.count {
+            print("FEATURE \(i): type=\(f.type) xCenter=\(f.xCenter) pathPoints=\(f.rawPath.count)")
+            let path = f.rawPath
+            var len = 0.0
+            for j in 1..<path.count {
                     let dx = path[j].x - path[j-1].x
                     // Use a rough conversion for A to mm for debugging length
                     let da_mm = (path[j].a - path[j-1].a) * (.pi * 76.2 / 360.0) 
                     len += sqrt(Double(dx*dx + da_mm*da_mm))
                 }
                 print("  approx 2D length: \(len)mm")
-            }
         }
         let counts = stock.features.reduce(into: [SurfaceFeatureType: Int]()) { $0[$1.type, default: 0] += 1 }
         XCTAssertEqual(counts[.startCut], 1)
@@ -511,6 +510,95 @@ final class STEPBridgeTests: XCTestCase {
         
         XCTAssertTrue(foundStraightCut, "Could not find a straight cut block (constant X)")
         XCTAssertTrue(foundFishmouth, "Could not find a fishmouth block (varying X)")
+    }
+
+    func testHSSO4in514mmComplexEnd() throws {
+        let name = "hss-o/4in-514mm-complex-end.step"
+        let _ = try skip(ifMissing: name)
+
+        guard let model = loadModel(name),
+              let stock = model.selectableShapes.first?.stockInfo else {
+            XCTFail("Failed to load model or extract stock info from \(name)")
+            return
+        }
+
+        // The file is a ~101.6mm OD round tube (~514mm long) with one end intersected by
+        // an HSS tube.  The intersection depth varies: ~23mm on the deep side, <5mm on
+        // the shallow side.  The complex end profile is full 360° → must be startCut.
+        XCTAssertEqual(stock.profile, .round, "Stock must be identified as round (HSS-O)")
+
+        let startCuts = stock.features.filter { $0.type == .startCut }
+        XCTAssertGreaterThanOrEqual(startCuts.count, 1,
+            "Complex end intersection must produce at least one startCut feature. "
+            + "Got types: \(stock.features.map { $0.type.rawValue })")
+
+        // The complex end profile must NOT span an unreasonable X distance (≤ 50mm for
+        // this geometry).  The 200mm anomaly the user reported was the regression symptom.
+        for f in startCuts {
+            let xValues = f.rawPath.map { $0.x }
+            let xSpan = (xValues.max() ?? 0) - (xValues.min() ?? 0)
+            XCTAssertLessThanOrEqual(Double(xSpan), 50.0,
+                "startCut rawPath X span must not exceed 50mm (got \(xSpan)mm) — "
+                + "a large span indicates a spurious axial edge was included in the loop")
+        }
+
+        // Generate GCode and confirm the cutting block stays within the expected X range.
+        let gen = GCodeGenerator()
+        var s = GCodeSettings()
+        s.enableThermalHedging = false
+        s.useSimCNC = false
+        s.enableKerfComp = false
+        s.enableNonlinearErrorCompensation = false
+        s.enableSingularityDamping = false
+        gen.settings = s
+
+        let gcode = gen.generateGCode(for: stock)
+        let lines = gcode.components(separatedBy: .newlines)
+
+        struct G1Move { var x, y, z, a: Double? }
+        var cutBlocks: [[G1Move]] = []
+        var currentBlock: [G1Move] = []
+        var insideCut = false
+
+        for line in lines {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.contains("M3") { insideCut = true; currentBlock = [] }
+            else if t.contains("M5") {
+                if insideCut && !currentBlock.isEmpty { cutBlocks.append(currentBlock) }
+                insideCut = false; currentBlock = []
+            } else if insideCut && (t.hasPrefix("G1") || t.hasPrefix("G0")) {
+                var move = G1Move()
+                for p in t.components(separatedBy: .whitespaces) {
+                    let v = String(p.dropFirst())
+                    if p.hasPrefix("X") { move.x = Double(v) }
+                    else if p.hasPrefix("Y") { move.y = Double(v) }
+                    else if p.hasPrefix("Z") { move.z = Double(v) }
+                    else if p.hasPrefix("A") { move.a = Double(v) }
+                }
+                currentBlock.append(move)
+            }
+        }
+
+        // Find the block that corresponds to the complex end cut (a startCut).
+        // It must have full A-axis rotation (~360°) and X span ≤ 50mm.
+        var foundComplexEndCut = false
+        for (idx, block) in cutBlocks.enumerated() {
+            let xValues = block.compactMap { $0.x }
+            let aValues = block.compactMap { $0.a }
+            let xSpan = (xValues.max() ?? 0) - (xValues.min() ?? 0)
+            let aSpan = (aValues.max() ?? 0) - (aValues.min() ?? 0)
+
+            if aSpan >= 350.0 {
+                // This is a full-rotation cut — the complex end profile.
+                XCTAssertLessThanOrEqual(xSpan, 50.0,
+                    "Complex end cut (block \(idx)) X span must be ≤ 50mm, got \(xSpan)mm. "
+                    + "200mm would indicate regression.")
+                foundComplexEndCut = true
+            }
+        }
+
+        XCTAssertTrue(foundComplexEndCut,
+            "Must find at least one full-rotation cutting block for the complex end profile")
     }
 
     func testHSSO3in125mmNoFeatures() throws {

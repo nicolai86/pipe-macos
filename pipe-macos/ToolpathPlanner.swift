@@ -12,9 +12,15 @@ struct PlannedPath {
     let isInternal: Bool
 }
 
+/// A feature that has been through the 2D planning stage.
+struct PlannedFeature {
+    let source: GeometricFeature
+    let plannedPath: PlannedPath
+}
+
 // MARK: - Toolpath Planner
 
-/// Transforms a raw SurfaceFeature into a planned 2D surface-space toolpath.
+/// Transforms a raw GeometricFeature into a planned 2D surface-space toolpath.
 ///
 /// All operations work in (X, A) surface coordinates.
 /// No machine kinematics are applied at this stage.
@@ -24,14 +30,15 @@ struct ToolpathPlanner {
     // MARK: - Public API
 
     func plan(
-        feature: SurfaceFeature,
+        feature: GeometricFeature,
         stock: StockInfo,
         packStartX: CGFloat,
         rollOffset: CGFloat,
         previousMachineAm: CGFloat
-    ) -> PlannedPath {
-        guard let localPath = feature.path, localPath.count > 1 else {
-            return PlannedPath(points: [], isInternal: false)
+    ) -> PlannedFeature {
+        let localPath = feature.rawPath
+        guard localPath.count > 1 else {
+            return PlannedFeature(source: feature, plannedPath: PlannedPath(points: [], isInternal: false))
         }
 
         // 1. Apply pack + roll offsets
@@ -132,7 +139,7 @@ struct ToolpathPlanner {
         )
         finalPath.insert(contentsOf: leadInPoints, at: 0)
 
-        return PlannedPath(points: finalPath, isInternal: isInternal)
+        return PlannedFeature(source: feature, plannedPath: PlannedPath(points: finalPath, isInternal: isInternal))
     }
 
     // MARK: - Pierce Point Selection
