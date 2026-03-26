@@ -99,11 +99,9 @@ struct GCodeSettings {
     var enableSingularityDamping: Bool = true
 
     /// The maximum damping factor applied at the peak of a singularity (corner).
-    /// Higher values allow for smoother motion through tighter corners at the cost of slight path deviation.
     var singularityDampingFactor: CGFloat = 2.0
 
     /// The threshold of manipulability (dS/dA) below which damping begins to activate.
-    /// Targets the "velocity blow-up" region of the kinematic Jacobian.
     var dampingThreshold: CGFloat = 0.1
 
     // -------------------------------------------------------------------------
@@ -191,104 +189,82 @@ struct TrajectorySegment {
 }
 
 // MARK: - GCode Generator
+
 class GCodeGenerator {
     var settings = GCodeSettings()
 
     // MARK: - Single Part Generation
+
     func generateGCode(for stock: StockInfo) -> String {
         let rollOffset = GCodeGenerator.calculateRollOffset(for: stock)
+        let emitter = GCodeEmitter(settings: settings)
         var gcode: [String] = []
-        gcode.append(contentsOf: generateHeader(stock: stock))
-        gcode.append(
-            contentsOf: generateStartupSequence(
-                totalLength: stock.length,
-                stock: stock
-            )
-        )
+        gcode.append(contentsOf: emitter.emitHeader(stock: stock))
+        gcode.append(contentsOf: emitter.emitStartup(totalLength: stock.length, stock: stock))
 
         var currentA: CGFloat = 0
+        let radius: CGFloat = stock.profile == .round
+            ? (stock.od ?? 50.0) / 2.0
+            : max(stock.odX ?? 50.0, stock.odY ?? 50.0) / 2.0
 
+        let allGlobalFeatures = stock.features.map {
+            GlobalFeature(
+                feature: $0, stock: stock, packStartX: 0,
+                packEndX: stock.length, rollOffset: rollOffset, pieceIndex: 0
+            )
+        }
+
+        let orderedFeatures: [GlobalFeature]
         if settings.enableThermalHedging {
-            let radius =
-                stock.profile == .round
-                ? (stock.od ?? 50.0) / 2.0
-                : max(stock.odX ?? 50.0, stock.odY ?? 50.0) / 2.0
-            let allFeatures = stock.features.map {
-                GlobalFeature(
-                    feature: $0,
-                    stock: stock,
-                    packStartX: 0,
-                    packEndX: stock.length,
-                    rollOffset: rollOffset,
-                    pieceIndex: 0
-                )
+            var internals = allGlobalFeatures.filter {
+                $0.feature.type == .hole || $0.feature.type == .cutout || $0.feature.type == .notch
             }
-
-            var internals = allFeatures.filter {
-                $0.feature.type == .hole || $0.feature.type == .cutout
-                    || $0.feature.type == .notch
-            }
-            var severs = allFeatures.filter {
+            var severs = allGlobalFeatures.filter {
                 $0.feature.type == .startCut || $0.feature.type == .endCut
             }
-
-            internals = sequenceForThermalHedging(
-                features: internals,
-                radius: radius
-            )
+            internals = sequenceForThermalHedging(features: internals, radius: radius)
             severs.sort { $0.globalX > $1.globalX }
-
-            let finalSequence = internals + severs
-            for gf in finalSequence {
-                let (toolpath, finalA) = generateTCPToolpath(
-                    feature: gf.feature,
-                    stock: gf.stock,
-                    packStartX: gf.packStartX,
-                    packEndX: gf.packEndX,
-                    rollOffset: gf.rollOffset,
-                    currentA: currentA,
-                    isPackMode: false
-                )
-                gcode.append(contentsOf: toolpath)
-                gcode.append("")
-                currentA = finalA
-            }
+            orderedFeatures = internals + severs
         } else {
-            let sortedFeatures = sortFeatures(stock.features)
-            for feature in sortedFeatures {
-                let (toolpath, finalA) = generateTCPToolpath(
-                    feature: feature,
-                    stock: stock,
-                    packStartX: 0,
-                    packEndX: stock.length,
-                    rollOffset: rollOffset,
-                    currentA: currentA,
-                    isPackMode: false
+            orderedFeatures = sortFeatures(stock.features).map {
+                GlobalFeature(
+                    feature: $0, stock: stock, packStartX: 0,
+                    packEndX: stock.length, rollOffset: rollOffset, pieceIndex: 0
                 )
-                gcode.append(contentsOf: toolpath)
-                gcode.append("")
-                currentA = finalA
             }
         }
 
-        gcode.append(contentsOf: generateEndSequence(stock: stock))
+        for gf in orderedFeatures {
+            let (toolpath, finalA) = generateTCPToolpath(
+                feature: gf.feature, stock: gf.stock,
+                packStartX: gf.packStartX, rollOffset: gf.rollOffset,
+                currentA: currentA, isPackMode: false
+            )
+            gcode.append(contentsOf: toolpath)
+            gcode.append("")
+            currentA = finalA
+        }
+
+        gcode.append(contentsOf: emitter.emitEnd(stock: stock))
         return gcode.joined(separator: "\n")
     }
 
     // MARK: - Pack G-code Generation
+
     func generatePackGCode(entries: [PackEntry]) -> String {
         guard !entries.isEmpty, let refStock = entries[0].shape.stockInfo else {
             return "; Empty pack — no G-code generated"
         }
 
-        let totalLength =
-            entries.max(by: { $0.packEndX < $1.packEndX })?.packEndX ?? 0
+        let totalLength = entries.max(by: { $0.packEndX < $1.packEndX })?.packEndX ?? 0
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy, HH:mm"
-
-        let safeZ =
-            settings.enableDynamicSafeZ
-            ? getDynamicSafeZ(stock: refStock) : settings.safeHeight
+        let emitter = GCodeEmitter(settings: settings)
+        let safeZ = settings.enableDynamicSafeZ
+            ? emitter.getDynamicSafeZ(stock: refStock) : settings.safeHeight
+        let unitLabel = settings.units == .inches ? "in" : "mm"
+        let unitModeWord = settings.units == .inches ? "G20" : "G21"
+        let unitModeComment = settings.units == .inches ? "inch mode" : "metric mode"
 
         var lines: [String] = [
             "%",
@@ -314,59 +290,37 @@ class GCodeGenerator {
         var currentA: CGFloat = 0
 
         if settings.enableThermalHedging {
-            lines.append(
-                "; === Thermal Hedging Enabled: Global Cut Sequencing ==="
-            )
+            lines.append("; === Thermal Hedging Enabled: Global Cut Sequencing ===")
             var allFeatures: [GlobalFeature] = []
-
             for (idx, entry) in entries.enumerated() {
                 guard let stock = entry.shape.stockInfo else { continue }
                 let rollOffset = GCodeGenerator.calculateRollOffset(for: stock)
                 for f in stock.features {
-                    allFeatures.append(
-                        GlobalFeature(
-                            feature: f,
-                            stock: stock,
-                            packStartX: entry.packStartX,
-                            packEndX: entry.packEndX,
-                            rollOffset: rollOffset,
-                            pieceIndex: idx
-                        )
-                    )
+                    allFeatures.append(GlobalFeature(
+                        feature: f, stock: stock,
+                        packStartX: entry.packStartX, packEndX: entry.packEndX,
+                        rollOffset: rollOffset, pieceIndex: idx
+                    ))
                 }
             }
-
+            let radius: CGFloat = refStock.profile == .round
+                ? (refStock.od ?? 50.0) / 2.0
+                : max(refStock.odX ?? 50.0, refStock.odY ?? 50.0) / 2.0
             var internals = allFeatures.filter {
-                $0.feature.type == .hole || $0.feature.type == .cutout
-                    || $0.feature.type == .notch
+                $0.feature.type == .hole || $0.feature.type == .cutout || $0.feature.type == .notch
             }
             var severs = allFeatures.filter {
                 $0.feature.type == .startCut || $0.feature.type == .endCut
             }
-            let radius: CGFloat =
-                refStock.profile == .round
-                ? (refStock.od ?? 50.0) / 2.0
-                : max(refStock.odX ?? 50.0, refStock.odY ?? 50.0) / 2.0
-
-            internals = sequenceForThermalHedging(
-                features: internals,
-                radius: radius
-            )
+            internals = sequenceForThermalHedging(features: internals, radius: radius)
             severs.sort { $0.globalX > $1.globalX }
 
-            let finalSequence = internals + severs
-            for gf in finalSequence {
-                lines.append(
-                    "; ┌── Piece \(gf.pieceIndex + 1)/\(entries.count) | Feature: \(gf.feature.type.rawValue) at Global X=\(fmt(gf.globalX)) ──"
-                )
+            for gf in internals + severs {
+                lines.append("; ┌── Piece \(gf.pieceIndex + 1)/\(entries.count) | Feature: \(gf.feature.type.rawValue) at Global X=\(fmt(gf.globalX)) ──")
                 let (toolpath, finalA) = generateTCPToolpath(
-                    feature: gf.feature,
-                    stock: gf.stock,
-                    packStartX: gf.packStartX,
-                    packEndX: gf.packEndX,
-                    rollOffset: gf.rollOffset,
-                    currentA: currentA,
-                    isPackMode: true
+                    feature: gf.feature, stock: gf.stock,
+                    packStartX: gf.packStartX, rollOffset: gf.rollOffset,
+                    currentA: currentA, isPackMode: true
                 )
                 lines += toolpath
                 lines.append("")
@@ -384,17 +338,11 @@ class GCodeGenerator {
                         + "L=\(fmt(stock.length))mm  "
                         + "\(stock.features.count) feature\(stock.features.count == 1 ? "" : "s") ──",
                 ]
-
-                let sortedFeatures = sortFeatures(stock.features)
-                for feature in sortedFeatures {
+                for feature in sortFeatures(stock.features) {
                     let (toolpath, finalA) = generateTCPToolpath(
-                        feature: feature,
-                        stock: stock,
-                        packStartX: entry.packStartX,
-                        packEndX: entry.packEndX,
-                        rollOffset: rollOffset,
-                        currentA: currentA,
-                        isPackMode: true
+                        feature: feature, stock: stock,
+                        packStartX: entry.packStartX, rollOffset: rollOffset,
+                        currentA: currentA, isPackMode: true
                     )
                     lines += toolpath
                     lines.append("")
@@ -403,9 +351,11 @@ class GCodeGenerator {
             }
         }
 
-        lines += generateEndSequence(stock: refStock)
+        lines += emitter.emitEnd(stock: refStock)
         return lines.joined(separator: "\n")
     }
+
+    // MARK: - Roll Offset
 
     static func calculateRollOffset(for stock: StockInfo) -> CGFloat {
         let q1 = alignAxisToX(stock.axis)
@@ -427,7 +377,37 @@ class GCodeGenerator {
         return simd_quatf(angle: acos(d), axis: normalize(cross(a, target)))
     }
 
-    // MARK: - Thermal Hedging Algorithm
+    // MARK: - TCP Toolpath (Orchestrator)
+
+    private func generateTCPToolpath(
+        feature: SurfaceFeature,
+        stock: StockInfo,
+        packStartX: CGFloat,
+        rollOffset: CGFloat,
+        currentA: CGFloat,
+        isPackMode: Bool
+    ) -> ([String], CGFloat) {
+        let planned = ToolpathPlanner(settings: settings).plan(
+            feature: feature, stock: stock,
+            packStartX: packStartX, rollOffset: rollOffset,
+            previousMachineAm: currentA
+        )
+        guard !planned.points.isEmpty else { return ([], currentA) }
+
+        let machines = KinematicsEngine(settings: settings).convert(
+            path: planned, stock: stock,
+            initialMachineAm: isPackMode ? currentA : nil
+        )
+        let segments = VelocityProfiler(settings: settings).profile(machinePoints: machines)
+        return GCodeEmitter(settings: settings).emitFeature(
+            machinePoints: machines, segments: segments,
+            feature: feature, stock: stock,
+            packStartX: packStartX, rollOffset: rollOffset,
+            isInternal: planned.isInternal
+        )
+    }
+
+    // MARK: - Thermal Hedging
 
     private func sequenceForThermalHedging(
         features: [GlobalFeature],
@@ -436,24 +416,13 @@ class GCodeGenerator {
         guard !features.isEmpty else { return [] }
         var remaining = features
         var sequenced: [GlobalFeature] = []
-
         remaining.sort { $0.globalX > $1.globalX }
         var current = remaining.removeFirst()
         sequenced.append(current)
-
         while !remaining.isEmpty {
             if let nextIdx = remaining.indices.max(by: { i, j in
-                let distI = thermalDistance(
-                    current,
-                    remaining[i],
-                    radius: radius
-                )
-                let distJ = thermalDistance(
-                    current,
-                    remaining[j],
-                    radius: radius
-                )
-                return distI < distJ
+                thermalDistance(current, remaining[i], radius: radius)
+                    < thermalDistance(current, remaining[j], radius: radius)
             }) {
                 current = remaining.remove(at: nextIdx)
                 sequenced.append(current)
@@ -470,965 +439,16 @@ class GCodeGenerator {
         let dx = (f1.globalX - f2.globalX) * settings.thermalHedgingWeightX
         var da = abs(
             f1.globalA.truncatingRemainder(dividingBy: 360.0)
-                - f2.globalA.truncatingRemainder(dividingBy: 360.0)
+            - f2.globalA.truncatingRemainder(dividingBy: 360.0)
         )
         if da > 180.0 { da = 360.0 - da }
-        let arcLen =
-            (da * .pi / 180.0 * radius) * settings.thermalHedgingWeightA
+        let arcLen = (da * .pi / 180.0 * radius) * settings.thermalHedgingWeightA
         return sqrt(dx * dx + arcLen * arcLen)
     }
 
-    // MARK: - HSS Geodesic Arc-Length Profile
+    // MARK: - Feature Sorting
 
-    /// Maps between the angular coordinate A (degrees, as stored in ToolpathPoint.a)
-    /// and the geodesic arc-length s (mm) along the outer perimeter of a rectangular HSS.
-    ///
-    /// Giving the kerf-offset algorithm a geodesic working plane means each millimetre
-    /// of s is exactly 1 mm of surface distance, so a 2D perpendicular offset in (X, s)
-    /// space equals a true geodesic kerf offset on the tube surface.
-    ///
-    /// The uniform approximation k = π·OD/360 treats every point on the cross-section
-    /// as if it sat on a circle of radius OD/2.  For the flat sides that over-compensates
-    /// (infinite radius of curvature), and for corner fillets it is wrong by a factor of
-    /// roughly OD/(2·cornerRadius) — typically ~8× for standard 3 mm fillets on 50 mm HSS.
-    private struct HSSGeodesicProfile {
-        private struct Sample { let a: CGFloat; let s: CGFloat }
-        /// Sorted by both .a and .s — CCW tracing guarantees both are monotone.
-        private let table: [Sample]
-        let perimeter: CGFloat
-
-        init(odX: CGFloat, odY: CGFloat, cornerRadius: CGFloat) {
-            let R  = max(cornerRadius, 0.1)
-            let hw = odX / 2.0 - R
-            let hh = odY / 2.0 - R
-            var raw: [(a: CGFloat, s: CGFloat)] = []
-            var cumS: CGFloat = 0
-
-            let nFlat = 30   // samples per flat segment
-            let nArc  = 15   // samples per 90° fillet arc
-
-            func sa(u: CGFloat, v: CGFloat) -> CGFloat {
-                var a = CGFloat(atan2(Double(v), Double(u)) * 180.0 / .pi)
-                if a < 0 { a += 360 }
-                return a
-            }
-            func flatSeg(u0: CGFloat, v0: CGFloat, u1: CGFloat, v1: CGFloat) {
-                let len = sqrt((u1-u0)*(u1-u0) + (v1-v0)*(v1-v0))
-                guard len > 1e-6 else { return }
-                for i in 0..<nFlat {
-                    let t = CGFloat(i) / CGFloat(nFlat)
-                    raw.append((sa(u: u0 + t*(u1-u0), v: v0 + t*(v1-v0)), cumS + len * t))
-                }
-                cumS += len
-            }
-            func arcSeg(cx: CGFloat, cy: CGFloat, phi0: CGFloat, phi1: CGFloat) {
-                let arcLen = R * abs(phi1 - phi0) * .pi / 180.0
-                guard arcLen > 1e-6 else { return }
-                for i in 0..<nArc {
-                    let t  = CGFloat(i) / CGFloat(nArc)
-                    let ph = phi0 + t * (phi1 - phi0)
-                    let u  = cx + R * CGFloat(cos(Double(ph) * .pi / 180.0))
-                    let v  = cy + R * CGFloat(sin(Double(ph) * .pi / 180.0))
-                    raw.append((sa(u: u, v: v), cumS + arcLen * t))
-                }
-                cumS += arcLen
-            }
-
-            // Trace CCW from A = 0° (midpoint of right face = uAxis direction)
-            flatSeg(u0: odX/2,  v0:  0,      u1: odX/2,  v1:  hh)      // right ↑
-            arcSeg (cx: hw,     cy:  hh,     phi0:  0,   phi1:  90)     // upper-right fillet
-            flatSeg(u0: hw,     v0:  odY/2,  u1: -hw,    v1:  odY/2)   // top →
-            arcSeg (cx: -hw,    cy:  hh,     phi0: 90,   phi1: 180)     // upper-left fillet
-            flatSeg(u0: -odX/2, v0:  hh,     u1: -odX/2, v1: -hh)      // left ↓
-            arcSeg (cx: -hw,    cy: -hh,     phi0: 180,  phi1: 270)     // lower-left fillet
-            flatSeg(u0: -hw,    v0: -odY/2,  u1:  hw,    v1: -odY/2)   // bottom →
-            arcSeg (cx: hw,     cy: -hh,     phi0: 270,  phi1: 360)     // lower-right fillet
-            flatSeg(u0: odX/2,  v0: -hh,     u1:  odX/2, v1:  0)       // right ↑ (lower half)
-
-            perimeter = cumS
-            table = raw.sorted { $0.a < $1.a }.map { Sample(a: $0.a, s: $0.s) }
-        }
-
-        /// Converts angle A (degrees, may be unwrapped outside [0°,360°)) to geodesic arc-length (mm).
-        func encode(_ a: CGFloat) -> CGFloat {
-            let revs = (a / 360.0).rounded(.down)
-            return arcLengthFolded(a - revs * 360.0) + revs * perimeter
-        }
-
-        /// Converts geodesic arc-length (mm, may be unwrapped) to angle A (degrees).
-        func decode(_ s: CGFloat) -> CGFloat {
-            let revs = (s / perimeter).rounded(.down)
-            return angleFolded(s - revs * perimeter) + revs * 360.0
-        }
-
-        private func arcLengthFolded(_ aN: CGFloat) -> CGFloat {
-            guard table.count > 1 else { return aN * perimeter / 360.0 }
-            var lo = 0, hi = table.count
-            while lo < hi { let m = (lo+hi)/2; if table[m].a < aN { lo = m+1 } else { hi = m } }
-            guard lo > 0 else { return table[0].s }
-            guard lo < table.count else { return table.last!.s }
-            let l = table[lo-1], r = table[lo]
-            return l.s + (aN - l.a) / (r.a - l.a) * (r.s - l.s)
-        }
-
-        private func angleFolded(_ sN: CGFloat) -> CGFloat {
-            guard table.count > 1 else { return sN * 360.0 / perimeter }
-            var lo = 0, hi = table.count
-            while lo < hi { let m = (lo+hi)/2; if table[m].s < sN { lo = m+1 } else { hi = m } }
-            guard lo > 0 else { return table[0].a }
-            guard lo < table.count else { return table.last!.a }
-            let l = table[lo-1], r = table[lo]
-            return l.a + (sN - l.s) / (r.s - l.s) * (r.a - l.a)
-        }
-    }
-
-    // MARK: - SOTA: Offline 2D Polyline Kerf Offset
-
-    private func applyOfflineKerfOffset(
-        to path: [ToolpathPoint],
-        radius: CGFloat,
-        isClosed: Bool,
-        encode: (CGFloat) -> CGFloat,
-        decode: (CGFloat) -> CGFloat
-    ) -> [ToolpathPoint] {
-        guard path.count > 1, radius != 0 else { return path }
-        let pts: [(x: CGFloat, y: CGFloat)] = path.map { ($0.x, encode($0.a)) }
-        var offsetPts: [(x: CGFloat, y: CGFloat)] = []
-
-        for i in 0..<pts.count {
-            let prevIdx = (i == 0) ? (isClosed ? pts.count - 2 : 0) : i - 1
-            let nextIdx =
-                (i == pts.count - 1) ? (isClosed ? 1 : pts.count - 1) : i + 1
-            let pPrev = pts[prevIdx]
-            let pCurr = pts[i]
-            let pNext = pts[nextIdx]
-
-            var vInX = pCurr.x - pPrev.x
-            var vInY = pCurr.y - pPrev.y
-            let lenIn = sqrt(vInX * vInX + vInY * vInY)
-            if lenIn > 1e-6 {
-                vInX /= lenIn
-                vInY /= lenIn
-            }
-
-            var vOutX = pNext.x - pCurr.x
-            var vOutY = pNext.y - pCurr.y
-            let lenOut = sqrt(vOutX * vOutX + vOutY * vOutY)
-            if lenOut > 1e-6 {
-                vOutX /= lenOut
-                vOutY /= lenOut
-            }
-
-            if !isClosed {
-                if i == 0 {
-                    vInX = vOutX
-                    vInY = vOutY
-                } else if i == pts.count - 1 {
-                    vOutX = vInX
-                    vOutY = vInY
-                }
-            }
-
-            let nInX = -vInY
-            let nInY = vInX
-            let nOutX = -vOutY
-            let nOutY = vOutX
-            let p1x = pCurr.x + radius * nInX
-            let p1y = pCurr.y + radius * nInY
-            let p2x = pCurr.x + radius * nOutX
-            let p2y = pCurr.y + radius * nOutY
-            let cross = vInX * vOutY - vInY * vOutX
-
-            if abs(cross) < 1e-6 {
-                offsetPts.append((p1x, p1y))
-            } else {
-                let dx = p2x - p1x
-                let dy = p2y - p1y
-                let t = (dx * vOutY - dy * vOutX) / cross
-                offsetPts.append((p1x + t * vInX, p1y + t * vInY))
-            }
-        }
-        if isClosed { offsetPts[offsetPts.count - 1] = offsetPts[0] }
-        return offsetPts.map { ToolpathPoint(x: $0.x, a: decode($0.y)) }
-    }
-
-    // MARK: - State of the Art Offline TCP Generation
-
-    private func generateTCPToolpath(
-        feature: SurfaceFeature,
-        stock: StockInfo,
-        packStartX: CGFloat,
-        packEndX: CGFloat,
-        rollOffset: CGFloat,
-        currentA: CGFloat,
-        isPackMode: Bool
-    ) -> ([String], CGFloat) {
-        guard let localPath = feature.path, localPath.count > 1 else {
-            return ([], currentA)
-        }
-
-        let packPath = localPath.map {
-            ToolpathPoint(x: $0.x + packStartX, a: $0.a + rollOffset)
-        }
-        let rawPierceA = packPath[0].a
-        let shift = round((currentA - rawPierceA) / 360.0) * 360.0
-        var adjPath = packPath.map { ToolpathPoint(x: $0.x, a: $0.a + shift) }
-
-        let OD: CGFloat =
-            stock.profile == .round
-            ? (stock.od ?? 50.0) : max(stock.odX ?? 50.0, stock.odY ?? 50.0)
-        let k = (.pi * OD) / 360.0
-
-        // Geodesic encode/decode for kerf compensation only.
-        // All other uses of k (distances, overburn, lead-in) are unchanged.
-        // For round stock: s = A·k exactly (identical to the existing formula).
-        // For HSS: s(A) is piecewise nonlinear — geodesic gives a correct offset.
-        let encodeA: (CGFloat) -> CGFloat
-        let decodeS: (CGFloat) -> CGFloat
-        if stock.profile != .round,
-           let oX = stock.odX, let oY = stock.odY,
-           let cr = stock.cornerRadius {
-            let geo = HSSGeodesicProfile(odX: oX, odY: oY, cornerRadius: cr)
-            encodeA = { geo.encode($0) }
-            decodeS = { geo.decode($0) }
-        } else {
-            encodeA = { $0 * k }
-            decodeS = { $0 / k }
-        }
-
-        var isInternal =
-            (feature.type == .hole || feature.type == .cutout
-                || feature.type == .notch)
-
-        if isInternal && adjPath.count > 2 {
-            var maxLen: CGFloat = -1
-            var bestIdx = 0
-            for i in 0..<adjPath.count - 1 {
-                let dx = adjPath[i + 1].x - adjPath[i].x
-                let da_mm = (adjPath[i + 1].a - adjPath[i].a) * k
-                let len = sqrt(dx * dx + da_mm * da_mm)
-                if len > maxLen {
-                    maxLen = len
-                    bestIdx = i
-                }
-            }
-            let midPt = ToolpathPoint(
-                x: (adjPath[bestIdx].x + adjPath[bestIdx + 1].x) / 2.0,
-                a: (adjPath[bestIdx].a + adjPath[bestIdx + 1].a) / 2.0
-            )
-            var newPath: [ToolpathPoint] = [midPt]
-            newPath.append(
-                contentsOf: adjPath[(bestIdx + 1)..<(adjPath.count - 1)]
-            )
-            newPath.append(contentsOf: adjPath[0...bestIdx])
-            newPath.append(midPt)
-
-            var continuousPath = [newPath[0]]
-            for i in 1..<newPath.count {
-                var currA = newPath[i].a
-                let prevA = continuousPath.last!.a
-                while currA - prevA > 180.0 { currA -= 360.0 }
-                while currA - prevA < -180.0 { currA += 360.0 }
-                continuousPath.append(ToolpathPoint(x: newPath[i].x, a: currA))
-            }
-            adjPath = continuousPath
-        } else if (feature.type == .startCut || feature.type == .endCut)
-            && adjPath.count > 1
-        {
-            var bestIdx = 0
-            var minDiff = CGFloat.greatestFiniteMagnitude
-            for (i, pt) in adjPath.enumerated() {
-                let modA = abs(pt.a.truncatingRemainder(dividingBy: 90.0))
-                let diff = min(modA, 90.0 - modA)
-                if diff < minDiff {
-                    minDiff = diff
-                    bestIdx = i
-                }
-            }
-            if bestIdx > 0 {
-                var corePath = adjPath
-                if abs(corePath.last!.a - (corePath.first!.a + 360.0)) < 1.0 {
-                    corePath.removeLast()
-                }
-                let reordered =
-                    Array(corePath[bestIdx...]) + Array(corePath[..<bestIdx])
-                var newPath: [ToolpathPoint] = [reordered[0]]
-                for i in 1..<reordered.count {
-                    var current_A = reordered[i].a
-                    let prev_A = newPath.last!.a
-                    while current_A - prev_A > 180.0 { current_A -= 360.0 }
-                    while current_A - prev_A < -180.0 { current_A += 360.0 }
-                    newPath.append(
-                        ToolpathPoint(x: reordered[i].x, a: current_A)
-                    )
-                }
-                let firstPt = newPath.first!
-                var closeA = firstPt.a
-                let lastA = newPath.last!.a
-                while closeA - lastA > 180.0 { closeA -= 360.0 }
-                while closeA - lastA < -180.0 { closeA += 360.0 }
-                newPath.append(ToolpathPoint(x: firstPt.x, a: closeA))
-                adjPath = newPath
-            }
-        }
-
-        var finalPath = adjPath
-        var signedArea: CGFloat = 0
-        for i in 0..<finalPath.count - 1 {
-            signedArea +=
-                (finalPath[i].x * (finalPath[i + 1].a * k) - finalPath[i + 1].x
-                    * (finalPath[i].a * k))
-        }
-
-        var isScrapLeft = false
-        if isInternal {
-            if signedArea > 0 { finalPath.reverse() }
-            isScrapLeft = false
-        } else {
-            if feature.type == .startCut {
-                if finalPath.last!.a < finalPath.first!.a {
-                    finalPath.reverse()
-                }
-                isScrapLeft = true
-            } else if feature.type == .endCut {
-                if finalPath.last!.a > finalPath.first!.a {
-                    finalPath.reverse()
-                }
-                isScrapLeft = false
-            }
-        }
-
-        if settings.enableKerfComp {
-            let kerfRadius =
-                isScrapLeft
-                ? (settings.kerfWidth / 2.0) : -(settings.kerfWidth / 2.0)
-            finalPath = applyOfflineKerfOffset(
-                to: finalPath,
-                radius: kerfRadius,
-                isClosed: isInternal,
-                encode: encodeA,
-                decode: decodeS
-            )
-        }
-
-        if finalPath.count > 2 {
-            let overburnDist = settings.overburnDegrees * k
-            let pLast = finalPath.last!
-            let pPrev = finalPath[finalPath.count - 2]
-            let dx = pLast.x - pPrev.x
-            let da_mm = (pLast.a - pPrev.a) * k
-            let len = sqrt(dx * dx + da_mm * da_mm)
-            if len > 0.001 {
-                finalPath.append(
-                    ToolpathPoint(
-                        x: pLast.x + (dx / len) * overburnDist,
-                        a: ((pLast.a * k) + (da_mm / len) * overburnDist) / k
-                    )
-                )
-            }
-        }
-
-        let p0 = finalPath[0]
-        let p1 =
-            finalPath.count > 1
-            ? finalPath[1] : ToolpathPoint(x: p0.x + 1, a: p0.a)
-        let dx = p1.x - p0.x
-        let da_mm = (p1.a - p0.a) * k
-        let gamma = atan2(da_mm, dx)
-        let leadR = settings.leadInAngleDistance
-        let leadTheta = settings.leadInAngle * .pi / 180.0
-        let leadL = settings.leadInDistance
-        let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
-        var leadInPoints: [ToolpathPoint] = []
-
-        if (feature.type == .startCut || feature.type == .endCut) {
-            // SOTA: Purely rotational lead-in for sever cuts.
-            // WHY: Sever cuts are usually zero-waste or perfectly aligned with the tube end.
-            // Moving in X during lead-in would waste stock or deviate from the desired cut line.
-            let leadAngleDeg = (leadL + leadR) / k
-            let entryA = p0.a - sideMultiplier * leadAngleDeg
-            
-            // Generate a simple rotational "arc" (just more points along A)
-            let steps = 5
-            for i in 0..<steps {
-                let t = CGFloat(i) / CGFloat(steps)
-                leadInPoints.append(ToolpathPoint(x: p0.x, a: entryA + sideMultiplier * leadAngleDeg * t))
-            }
-        } else if leadTheta > 0.01 && leadR > 0.01 {
-            let Cx = p0.x + leadR * cos(gamma + sideMultiplier * .pi / 2.0)
-            let Cy =
-                (p0.a * k) + leadR * sin(gamma + sideMultiplier * .pi / 2.0)
-            let startAngle =
-                (gamma - sideMultiplier * .pi / 2.0) - sideMultiplier
-                * leadTheta
-            let arcSteps = max(4, Int(leadTheta * 180 / .pi / 15))
-            for i in 0..<arcSteps {
-                let t =
-                    startAngle + sideMultiplier
-                    * (leadTheta * CGFloat(i) / CGFloat(arcSteps))
-                leadInPoints.append(
-                    ToolpathPoint(
-                        x: Cx + leadR * cos(t),
-                        a: (Cy + leadR * sin(t)) / k
-                    )
-                )
-            }
-            let firstArcPt = leadInPoints.first ?? p0
-            let entryTangent = gamma - sideMultiplier * leadTheta
-            leadInPoints.insert(
-                ToolpathPoint(
-                    x: firstArcPt.x - leadL * cos(entryTangent),
-                    a: ((firstArcPt.a * k) - leadL * sin(entryTangent)) / k
-                ),
-                at: 0
-            )
-        } else {
-            // Fallback for no arc lead-in
-            let entryTangent = gamma
-            leadInPoints.append(
-                ToolpathPoint(
-                    x: p0.x - leadL * cos(entryTangent),
-                    a: ((p0.a * k) - leadL * sin(entryTangent)) / k
-                )
-            )
-        }
-        finalPath.insert(contentsOf: leadInPoints, at: 0)
-
-        func getWrappedMachinePoint(pt: ToolpathPoint, refAm: CGFloat?)
-            -> MachinePoint
-        {
-            var mp = convertToMachine(pt: pt, stock: stock)
-            if let prev = refAm {
-                while mp.Am - prev > 180.0 { mp.Am -= 360.0 }
-                while mp.Am - prev < -180.0 { mp.Am += 360.0 }
-            } else if isPackMode {
-                while mp.Am - currentA > 180.0 { mp.Am -= 360.0 }
-                while mp.Am - currentA < -180.0 { mp.Am += 360.0 }
-            }
-            return mp
-        }
-
-        var rawMachinePoints: [MachinePoint] = []
-        var prevAmRaw: CGFloat? = nil
-        for pt in finalPath {
-            let mp = getWrappedMachinePoint(pt: pt, refAm: prevAmRaw)
-            prevAmRaw = mp.Am
-            rawMachinePoints.append(mp)
-        }
-
-        // ====================================================================
-        // --- ADAPTIVE DAMPED LEAST SQUARES (ADLS) SINGULARITY DAMPING ---
-        // ====================================================================
-        var dampedMachinePoints: [MachinePoint] = []
-        if !rawMachinePoints.isEmpty {
-            dampedMachinePoints.append(rawMachinePoints[0])
-            for i in 1..<rawMachinePoints.count {
-                let prevDamped = dampedMachinePoints.last!
-                let currRaw = rawMachinePoints[i]
-
-                if settings.enableSingularityDamping {
-                    let dx = currRaw.matX - prevDamped.matX
-                    let du = currRaw.matU - prevDamped.matU
-                    let dv = currRaw.matV - prevDamped.matV
-                    let ds_cartesian = sqrt(dx * dx + du * du + dv * dv)
-                    let target_dA = currRaw.Am - prevDamped.Am
-
-                    // --- Adaptive Damping Calculation ---
-                    // Manipulability 'm' is the ratio of surface travel to angular change.
-                    // When 'm' is high (flat face), damping should be zero.
-                    // When 'm' is low (corner), damping prevents A-axis velocity blow-up.
-                    let m =
-                        abs(target_dA) > 1e-6
-                        ? ds_cartesian / abs(target_dA)
-                        : settings.dampingThreshold
-
-                    let lambda: CGFloat
-                    if m < settings.dampingThreshold {
-                        // Region of singularity: apply adaptive damping based on manipulability
-                        let ratio = m / settings.dampingThreshold
-                        lambda =
-                            settings.singularityDampingFactor
-                            * (1.0 - pow(ratio, 2))
-                    } else {
-                        lambda = 0.0  // No damping on flat surfaces
-                    }
-
-                    let denominator = (ds_cartesian * ds_cartesian) + pow(lambda, 2)
-                    let dampingRatio = denominator > 1e-9 ? (ds_cartesian * ds_cartesian) / denominator : 1.0
-                    let newAm = prevDamped.Am + (target_dA * dampingRatio)
-
-                    let thetaRad = newAm * .pi / 180.0
-                    let newYm =
-                        currRaw.matU * cos(thetaRad) - currRaw.matV
-                        * sin(thetaRad)
-                    let newZm =
-                        currRaw.matU * sin(thetaRad) + currRaw.matV
-                        * cos(thetaRad)
-                    let baselineZ: CGFloat =
-                        (stock.profile == .round)
-                        ? (stock.od ?? 50.0) / 2.0
-                        : (stock.odY ?? stock.od ?? 50.0) / 2.0
-
-                    var dampedPt = currRaw
-                    dampedPt.Am = newAm
-                    dampedPt.Ym = newYm
-                    dampedPt.Zm = newZm - baselineZ
-                    dampedMachinePoints.append(dampedPt)
-                } else {
-                    dampedMachinePoints.append(currRaw)
-                }
-            }
-        }
-
-        var machinePoints: [MachinePoint] = []
-        if !dampedMachinePoints.isEmpty {
-            machinePoints.append(dampedMachinePoints[0])
-            for i in 1..<dampedMachinePoints.count {
-                let startMp = machinePoints.last!
-                let endMp = dampedMachinePoints[i]
-                func appendWithCompensation(
-                    sMp: MachinePoint,
-                    eMp: MachinePoint,
-                    depth: Int = 0
-                ) {
-                    if settings.enableNonlinearErrorCompensation && depth < 10 {
-                        let midU = (sMp.matU + eMp.matU) / 2.0
-                        let midV = (sMp.matV + eMp.matV) / 2.0
-                        let midAm = (sMp.Am + eMp.Am) / 2.0
-                        let thetaRad = midAm * .pi / 180.0
-                        let trueMidYm =
-                            midU * cos(thetaRad) - midV * sin(thetaRad)
-                        let baselineZ: CGFloat =
-                            (stock.profile == .round)
-                            ? (stock.od ?? 50.0) / 2.0
-                            : (stock.odY ?? stock.od ?? 50.0) / 2.0
-                        let trueMidZm =
-                            (midU * sin(thetaRad) + midV * cos(thetaRad))
-                            - baselineZ
-                        let dev = sqrt(
-                            pow(trueMidYm - (sMp.Ym + eMp.Ym) / 2.0, 2)
-                                + pow(trueMidZm - (sMp.Zm + eMp.Zm) / 2.0, 2)
-                        )
-                        if dev > settings.nonlinearErrorTolerance {
-                            var midPt = eMp
-                            midPt.matX = (sMp.matX + eMp.matX) / 2.0
-                            midPt.matU = midU
-                            midPt.matV = midV
-                            midPt.Am = midAm
-                            midPt.Ym = trueMidYm
-                            midPt.Zm = trueMidZm
-                            midPt.Xm = (sMp.Xm + eMp.Xm) / 2.0
-                            appendWithCompensation(
-                                sMp: sMp,
-                                eMp: midPt,
-                                depth: depth + 1
-                            )
-                            appendWithCompensation(
-                                sMp: midPt,
-                                eMp: eMp,
-                                depth: depth + 1
-                            )
-                            return
-                        }
-                    }
-                    machinePoints.append(eMp)
-                }
-                appendWithCompensation(sMp: startMp, eMp: endMp)
-            }
-        }
-
-        var segments: [TrajectorySegment] = []
-        let aMaxX = settings.maxAccelX * 3600.0
-        let aMaxY = settings.maxAccelY * 3600.0
-        let aMaxZ = settings.maxAccelZ * 3600.0
-        let aMaxA = settings.maxAccelA * 3600.0
-
-        let jMaxX = settings.maxJerkX * 216000.0
-        let jMaxY = settings.maxJerkY * 216000.0
-        let jMaxZ = settings.maxJerkZ * 216000.0
-        let jMaxA = settings.maxJerkA * 216000.0
-
-        for i in 1..<machinePoints.count {
-            let prev = machinePoints[i - 1]
-            let curr = machinePoints[i]
-            let dS = max(
-                1e-6,
-                sqrt(
-                    pow(curr.matX - prev.matX, 2)
-                        + pow(curr.matU - prev.matU, 2)
-                        + pow(curr.matV - prev.matV, 2)
-                )
-            )
-            let dXm = curr.Xm - prev.Xm
-            let dYm = curr.Ym - prev.Ym
-            let dZm = curr.Zm - prev.Zm
-            let dAm = curr.Am - prev.Am
-            let dMachine = sqrt(dXm * dXm + dYm * dYm + dZm * dZm + dAm * dAm)
-            let aPath = min(
-                abs(dXm) > 1e-6
-                    ? aMaxX * dS / abs(dXm) : .greatestFiniteMagnitude,
-                abs(dYm) > 1e-6
-                    ? aMaxY * dS / abs(dYm) : .greatestFiniteMagnitude,
-                abs(dZm) > 1e-6
-                    ? aMaxZ * dS / abs(dZm) : .greatestFiniteMagnitude,
-                abs(dAm) > 1e-6
-                    ? aMaxA * dS / abs(dAm) : .greatestFiniteMagnitude
-            )
-            let jPath = min(
-                abs(dXm) > 1e-6
-                    ? jMaxX * dS / abs(dXm) : .greatestFiniteMagnitude,
-                abs(dYm) > 1e-6
-                    ? jMaxY * dS / abs(dYm) : .greatestFiniteMagnitude,
-                abs(dZm) > 1e-6
-                    ? jMaxZ * dS / abs(dZm) : .greatestFiniteMagnitude,
-                abs(dAm) > 1e-6
-                    ? jMaxA * dS / abs(dAm) : .greatestFiniteMagnitude
-            )
-            segments.append(
-                TrajectorySegment(
-                    dS: dS,
-                    dMachine: dMachine,
-                    dXm: dXm,
-                    dYm: dYm,
-                    dZm: dZm,
-                    dAm: dAm,
-                    aPath: aPath,
-                    jPath: jPath
-                )
-            )
-        }
-
-        var vJunction = [CGFloat](
-            repeating: settings.feedRate,
-            count: machinePoints.count
-        )
-        if segments.count > 1 {
-            for i in 1..<segments.count {
-                let prev = segments[i - 1]
-                let curr = segments[i]
-                let dS_avg = (prev.dS + curr.dS) / 2.0
-                if dS_avg < 1e-6 { continue }
-                let drX = abs(curr.dXm / curr.dS - prev.dXm / prev.dS)
-                let drY = abs(curr.dYm / curr.dS - prev.dYm / prev.dS)
-                let drZ = abs(curr.dZm / curr.dS - prev.dZm / prev.dS)
-                let drA = abs(curr.dAm / curr.dS - prev.dAm / prev.dS)
-                vJunction[i] = min(
-                    settings.feedRate,
-                    min(
-                        drX > 1e-6
-                            ? sqrt(aMaxX * dS_avg / drX)
-                            : .greatestFiniteMagnitude,
-                        drY > 1e-6
-                            ? sqrt(aMaxY * dS_avg / drY)
-                            : .greatestFiniteMagnitude,
-                        drZ > 1e-6
-                            ? sqrt(aMaxZ * dS_avg / drZ)
-                            : .greatestFiniteMagnitude,
-                        drA > 1e-6
-                            ? sqrt(aMaxA * dS_avg / drA)
-                            : .greatestFiniteMagnitude
-                    )
-                )
-            }
-        }
-
-        // --- S-Curve Velocity Profiling ---
-        // Uses the S-curve distance formula: s = v_avg * (dv/a + a/j)
-        // to find the maximum reachable velocity over each segment.
-
-        func solveMaxV(v0: CGFloat, s: CGFloat, a: CGFloat, j: CGFloat)
-            -> CGFloat
-        {
-            if s < 1e-6 { return v0 }
-            // Case 1: reach a_max. Solve quadratic: j*v1^2 + a^2*v1 + (a^2*v0 - j*v0^2 - 2*s*a*j) = 0
-            let b = a * a
-            let c = a * a * v0 - j * v0 * v0 - 2.0 * s * a * j
-            let disc = b * b - 4.0 * j * c
-            if disc < 0 { return v0 + sqrt(2.0 * a * s) }  // Fallback to trapezoidal
-            let v1_quad = (-b + sqrt(disc)) / (2.0 * j)
-
-            // Case 2: don't reach a_max. s = (v0 + v1) * sqrt((v1 - v0)/j)
-            // Approx v1 using trapezoidal then refine
-            var v1 = v0 + sqrt(2.0 * min(a, sqrt(j * (v1_quad - v0 + 1.0))) * s)
-            for _ in 0..<3 {
-                let dv = max(0, v1 - v0)
-                let t = 2.0 * sqrt(dv / j)
-                let s_req = (v0 + v1) / 2.0 * t
-                v1 = v1 * (s / max(s_req, 1e-6))
-            }
-
-            return max(v0, min(v1_quad, v1))
-        }
-
-        // 1. Forward pass (Jerk-limited)
-        var vFwd = [CGFloat](repeating: 0.0, count: machinePoints.count)
-        vFwd[0] = 0
-        for i in 0..<segments.count {
-            let seg = segments[i]
-            let a = seg.aPath
-            let j = seg.jPath
-            vFwd[i + 1] = min(
-                vJunction[i + 1],
-                solveMaxV(v0: vFwd[i], s: seg.dS, a: a, j: j)
-            )
-        }
-
-        // 2. Backward pass (Jerk-limited)
-        var vFinal = [CGFloat](repeating: 0.0, count: machinePoints.count)
-        vFinal[segments.count] = 0
-        for i in stride(from: segments.count - 1, through: 0, by: -1) {
-            let seg = segments[i]
-            let a = seg.aPath
-            let j = seg.jPath
-            vFinal[i] = min(
-                vFwd[i],
-                solveMaxV(v0: vFinal[i + 1], s: seg.dS, a: a, j: j)
-            )
-        }
-        for i in 0..<segments.count {
-            if settings.useSimCNC {
-                let vSafe = max((vFinal[i] + vFinal[i + 1]) / 2.0, 1.0)
-                segments[i].finalF = min(
-                    segments[i].dMachine / (segments[i].dS / vSafe),
-                    settings.rapidRate
-                )
-            } else {
-                segments[i].finalF = max(
-                    min((vFinal[i] + vFinal[i + 1]) / 2.0, settings.feedRate),
-                    1.0
-                )
-            }
-        }
-
-        var lines: [String] = []
-        let typeStr = feature.type.rawValue.capitalized
-        let directionStr =
-            isInternal ? "CW (Physical CCW)" : "CCW (Physical CW)"
-        lines.append(
-            "; --- \(typeStr)  X=\(fmt(feature.xCenter + packStartX))mm  A=\(fmt(feature.aCenterDeg + rollOffset))° ---"
-        )
-        lines.append(
-            "; TCP ADLS Active | Swirl Comp: \(directionStr) | Tangential OB | Comp: Offline (\(settings.enableKerfComp ? "Enabled" : "Disabled"))"
-        )
-
-        let pierceMp = machinePoints[0]
-        let dynamicSafeZ =
-            settings.enableDynamicSafeZ
-            ? getDynamicSafeZ(stock: stock)
-            : (pierceMp.Zm + settings.safeHeight)
-        lines.append(
-            "G0 Z\(fmtU(dynamicSafeZ))  ; retract to asymmetric safe Z envelope"
-        )
-        lines.append(
-            "G0 X\(fmtU(pierceMp.Xm)) Y\(fmtU(pierceMp.Ym)) A\(fmt(pierceMp.Am)) ; rapid to pierce location"
-        )
-        lines.append(
-            "G0 Z\(fmtU(pierceMp.Zm + settings.pierceHeight)) ; lower to pierce height"
-        )
-        lines.append("M3 S1                         ; torch on")
-
-        var currentTHCState = true
-        if settings.enableDynamicTHC {
-            if pierceMp.isCorner {
-                lines.append(
-                    "#50 = #4061                  ; THC OFF (Corner Lock)"
-                )
-                lines.append(
-                    "#4061 = 100                  ; THC OFF (Corner Lock)"
-                )
-                currentTHCState = false
-            } else {
-                lines.append(
-                    "#4061 = #50                  ; THC ON (Flat Segment)"
-                )
-            }
-        }
-
-        for i in 1..<machinePoints.count {
-            let curr = machinePoints[i]
-            let seg = segments[i - 1]
-            if settings.enableDynamicTHC {
-                if curr.isCorner && currentTHCState {
-                    lines.append(
-                        "#50 = #4061"
-                    )
-                    lines.append("#4061 = 100; currentTHCState = false")
-                } else if !curr.isCorner && !currentTHCState {
-                    lines.append("#4061 = #50; currentTHCState = true")
-                }
-            }
-            lines.append(
-                "G1 X\(fmtU(curr.Xm)) Y\(fmtU(curr.Ym)) Z\(fmtU(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmtF(seg.finalF, segment: seg))"
-            )
-        }
-        lines.append("M5; G0 Z\(fmtU(dynamicSafeZ))")
-        return (lines, machinePoints.last!.Am)
-    }
-
-    private func getDynamicSafeZ(stock: StockInfo) -> CGFloat {
-        if stock.profile == .round { return settings.safeHeight }
-        let W = stock.odX ?? stock.od ?? 50.0
-        let H = stock.odY ?? stock.od ?? 50.0
-        let R = min(W, H) * 0.1
-        return settings.safeHeight
-            + (sqrt(pow(W / 2 - R, 2) + pow(H / 2 - R, 2)) + R - H / 2)
-    }
-
-    private func getProfilePoint(angleDeg: CGFloat, stock: StockInfo) -> (
-        u: CGFloat, v: CGFloat, Nu: CGFloat, Nv: CGFloat
-    ) {
-        if stock.profile == .round {
-            let r = (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
-            let rad = angleDeg * .pi / 180.0
-            return (r * cos(rad), r * sin(rad), cos(rad), sin(rad))
-        } else {
-            let W = stock.odX ?? stock.od ?? 50.0
-            let H = stock.odY ?? stock.od ?? 50.0
-            let R = stock.cornerRadius ?? (min(W, H) * 0.1)
-            let w = W - 2 * R
-            let h = H - 2 * R
-            let rad = angleDeg * .pi / 180.0
-            let cosPhi = cos(rad)
-            let sinPhi = sin(rad)
-            var bestT: CGFloat = .greatestFiniteMagnitude
-            var bestU: CGFloat = 0
-            var bestV: CGFloat = 0
-            var bestNu: CGFloat = 0
-            var bestNv: CGFloat = 0
-
-            if cosPhi > 1e-6 {
-                let t = (W / 2) / cosPhi
-                if abs(t * sinPhi) <= h / 2 {
-                    bestT = t
-                    bestU = W / 2
-                    bestV = t * sinPhi
-                    bestNu = 1
-                    bestNv = 0
-                }
-            }
-            if cosPhi < -1e-6 {
-                let t = (-W / 2) / cosPhi
-                if abs(t * sinPhi) <= h / 2 && t < bestT {
-                    bestT = t
-                    bestU = -W / 2
-                    bestV = t * sinPhi
-                    bestNu = -1
-                    bestNv = 0
-                }
-            }
-            if sinPhi > 1e-6 {
-                let t = (H / 2) / sinPhi
-                if abs(t * cosPhi) <= w / 2 && t < bestT {
-                    bestT = t
-                    bestU = t * cosPhi
-                    bestV = H / 2
-                    bestNu = 0
-                    bestNv = 1
-                }
-            }
-            if sinPhi < -1e-6 {
-                let t = (-H / 2) / sinPhi
-                if abs(t * cosPhi) <= w / 2 && t < bestT {
-                    bestT = t
-                    bestU = t * cosPhi
-                    bestV = -H / 2
-                    bestNu = 0
-                    bestNv = -1
-                }
-            }
-
-            let centers: [(CGFloat, CGFloat)] = [
-                (w / 2, h / 2), (-w / 2, h / 2), (-w / 2, -h / 2),
-                (w / 2, -h / 2),
-            ]
-            for (cx, cy) in centers {
-                let b = -2 * (cx * cosPhi + cy * sinPhi)
-                let c = cx * cx + cy * cy - R * R
-                let disc = b * b - 4 * c
-                if disc >= 0 {
-                    for t in [(-b - sqrt(disc)) / 2, (-b + sqrt(disc)) / 2] {
-                        if t > 1e-6 && t < bestT {
-                            let u = t * cosPhi
-                            let v = t * sinPhi
-                            if ((cx > 0) ? (u >= cx - 1e-4) : (u <= cx + 1e-4))
-                                && ((cy > 0)
-                                    ? (v >= cy - 1e-4) : (v <= cy + 1e-4))
-                            {
-                                bestT = t
-                                bestU = u
-                                bestV = v
-                                let len = sqrt(pow(u - cx, 2) + pow(v - cy, 2))
-                                bestNu = (u - cx) / len
-                                bestNv = (v - cy) / len
-                            }
-                        }
-                    }
-                }
-            }
-            return bestT == .greatestFiniteMagnitude
-                ? (0, H / 2, 0, 1) : (bestU, bestV, bestNu, bestNv)
-        }
-    }
-
-    private func convertToMachine(pt: ToolpathPoint, stock: StockInfo)
-        -> MachinePoint
-    {
-        let profile = getProfilePoint(angleDeg: pt.a, stock: stock)
-        let thetaRad = atan2(profile.Nu, profile.Nv)
-        let Ym = profile.u * cos(thetaRad) - profile.v * sin(thetaRad)
-        let Zm = profile.u * sin(thetaRad) + profile.v * cos(thetaRad)
-        let baselineZ =
-            (stock.profile == .round)
-            ? (stock.od ?? max(stock.odX ?? 50, stock.odY ?? 50)) / 2.0
-            : (stock.odY ?? stock.od ?? 50.0) / 2.0
-        let isCorner =
-            stock.profile == .round
-            ? false : !(abs(profile.Nu) > 0.999 || abs(profile.Nv) > 0.999)
-        return MachinePoint(
-            Xm: pt.x,
-            Ym: Ym,
-            Zm: Zm - baselineZ,
-            Am: thetaRad * 180.0 / .pi,
-            matX: pt.x,
-            matU: profile.u,
-            matV: profile.v,
-            isCorner: isCorner
-        )
-    }
-
-    private func fmt(_ val: CGFloat) -> String { String(format: "%.3f", val) }
-    private func fmtU(_ val: CGFloat) -> String {
-        settings.units == .inches
-            ? String(format: "%.4f", val / 25.4) : String(format: "%.3f", val)
-    }
-    private func fmtF(_ val: CGFloat, segment: TrajectorySegment? = nil)
-        -> String
-    {
-        var rate = val
-        if settings.units == .inches {
-            if settings.useSimCNC, let seg = segment, seg.dMachine > 1e-9 {
-                rate =
-                    val
-                    * sqrt(
-                        pow(seg.dXm / 25.4, 2) + pow(seg.dYm / 25.4, 2)
-                            + pow(seg.dZm / 25.4, 2) + pow(seg.dAm, 2)
-                    ) / seg.dMachine
-            } else {
-                rate = val / 25.4
-            }
-        }
-        return String(format: "%.3f", rate)
-    }
-
-    private var unitLabel: String { settings.units == .inches ? "in" : "mm" }
-    private var unitModeWord: String {
-        settings.units == .inches ? "G20" : "G21"
-    }
-    private var unitModeComment: String {
-        settings.units == .inches ? "inch mode" : "metric mode"
-    }
-    private func sortFeatures(_ features: [SurfaceFeature]) -> [SurfaceFeature]
-    {
+    private func sortFeatures(_ features: [SurfaceFeature]) -> [SurfaceFeature] {
         return features.sorted { a, b in
             func priority(_ t: SurfaceFeatureType) -> Int {
                 switch t {
@@ -1438,55 +458,18 @@ class GCodeGenerator {
                 }
             }
             return priority(a.type) != priority(b.type)
-                ? priority(a.type) < priority(b.type) : a.xCenter > b.xCenter
+                ? priority(a.type) < priority(b.type)
+                : a.xCenter > b.xCenter
         }
     }
 
-    private func generateHeader(stock: StockInfo) -> [String] {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "dd.MM.yyyy, HH:mm"
-        var header = [
-            "%", "(PROGRAM NAME: cylinder)",
-            "(GENERATED: \(formatter.string(from: Date())))",
-            "(STOCK: \(stock.profile.rawValue))",
-        ]
-        header.append(
-            stock.profile == .round
-                ? "(OD: \(fmtU(stock.od ?? 0))\(unitLabel))"
-                : "(OD: \(fmtU(stock.odX ?? 0))\(unitLabel) x \(fmtU(stock.odY ?? 0))\(unitLabel))"
-        )
-        header.append("(LENGTH: \(fmtU(stock.length))\(unitLabel))")
-        return header
-    }
+    // MARK: - Formatting (pack header only)
 
-    private func generateStartupSequence(
-        totalLength: CGFloat,
-        stock: StockInfo,
-        packMode: Bool = false,
-        count: Int = 1
-    ) -> [String] {
-        let safeZ =
-            settings.enableDynamicSafeZ
-            ? getDynamicSafeZ(stock: stock) : settings.safeHeight
-        return [
-            "\(unitModeWord) ; \(unitModeComment)",
-            "G90 ; absolute positioning", "G40 ; cancel cutter comp",
-            "G49 ; cancel tool length offset",
-            "G92 X\(fmtU(totalLength)) Y0 Z0 A0 ; set current position", "",
-            "G0 Z\(fmtU(safeZ)) ; move to safe height", "M5 ; torch off", "",
-            packMode
-                ? "; === Cutting Pattern (R-to-L, \(count) piece\(count == 1 ? "" : "s")) ==="
-                : "; === Cutting Pattern ===",
-        ]
-    }
+    private func fmt(_ val: CGFloat) -> String { String(format: "%.3f", val) }
 
-    private func generateEndSequence(stock: StockInfo?) -> [String] {
-        let safeZ =
-            (settings.enableDynamicSafeZ && stock != nil)
-            ? getDynamicSafeZ(stock: stock!) : settings.safeHeight
-        return [
-            "; === Program End ===", "M5", "G0 Z\(fmtU(safeZ))", "G0 X0 Y0 A0",
-            "M30", "%",
-        ]
+    private func fmtU(_ val: CGFloat) -> String {
+        settings.units == .inches
+            ? String(format: "%.4f", val / 25.4)
+            : String(format: "%.3f", val)
     }
 }

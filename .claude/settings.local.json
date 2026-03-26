@@ -31,7 +31,12 @@
       "Bash(brew --prefix opencascade)",
       "Bash(brew --prefix)",
       "Bash(GENERATE_FIXTURES=1 xcrun xctest -XCTest \"pipe_macosTests.FixtureGeneratorTests/testGenerateAllFixtures\" /Users/nicolai86/Library/Developer/Xcode/DerivedData/pipe-macos-dawpbvbawhufmxawbdapegpxvmwz/Build/Products/Debug/pipe-macos.app/Contents/PlugIns/pipe-macosTests.xctest)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(plutil:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(plutil -lint /Users/nicolai86/Workspace/python/pipe-macos/pipe-macos.xcodeproj/project.pbxproj)",
+      "Bash(grep -v \"^$\\\\|^    \\\\|^Command\\\\|^Build settings\\\\|^2026\\\\|^Information\\\\|Ignoring\")"
     ]
   }
 }

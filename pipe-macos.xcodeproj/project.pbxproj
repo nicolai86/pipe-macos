@@ -7,12 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		42D713422F6CB34F00932D0D /* OCCT_SETUP.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D713412F6CB34F00932D0D /* OCCT_SETUP.md */; };
 		42D7134C2F6CB41E00932D0D /* OpenCASCADE.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 42D7134B2F6CB41E00932D0D /* OpenCASCADE.xcconfig */; };
 		42D7134E2F6CB47900932D0D /* verify_occt.sh in Resources */ = {isa = PBXBuildFile; fileRef = 42D7134D2F6CB47900932D0D /* verify_occt.sh */; };
 		42D713572F6CB54100932D0D /* SETUP_GUIDE.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D713562F6CB54100932D0D /* SETUP_GUIDE.md */; };
 		42D713592F6CB56D00932D0D /* START_HERE.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D713582F6CB56D00932D0D /* START_HERE.md */; };
-		42D7135E2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md in Resources */ = {isa = PBXBuildFile; fileRef = 42D7135D2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md */; };
 		505BE73B3277D1530180D6E0 /* GCodeGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D88B36FAF85A83852AF0854 /* GCodeGenerator.swift */; };
 		A1000001 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* AppDelegate.swift */; };
 		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
@@ -27,9 +25,12 @@
 		A1000021 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000022 /* SettingsView.swift */; };
 		A1000032 /* GCodeGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000032 /* GCodeGeneratorTests.swift */; };
 		A1000033 /* STEPBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000033 /* STEPBridgeTests.swift */; };
+		AC000010 /* ToolpathPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC000011 /* ToolpathPipelineTests.swift */; };
 		A1000034 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000034 /* XCTest.framework */; };
-		A1000035 /* FeatureDetectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000035 /* FeatureDetectionTests.swift */; };
-		A1000036 /* FixtureGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000036 /* FixtureGeneratorTests.swift */; };
+		AA000001AA000001AA000001 /* ToolpathPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002AA000002AA000002 /* ToolpathPlanner.swift */; };
+		AA000003AA000003AA000003 /* KinematicsEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000004AA000004AA000004 /* KinematicsEngine.swift */; };
+		AA000005AA000005AA000005 /* VelocityProfiler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000006AA000006AA000006 /* VelocityProfiler.swift */; };
+		AA000007AA000007AA000007 /* GCodeEmitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000008AA000008AA000008 /* GCodeEmitter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -45,19 +46,13 @@
 /* Begin PBXFileReference section */
 		2D88B36FAF85A83852AF0854 /* GCodeGenerator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GCodeGenerator.swift; sourceTree = "<group>"; };
 		42D713402F6CB31900932D0D /* pipe-macos-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "pipe-macos-Bridging-Header.h"; sourceTree = "<group>"; };
-		42D713412F6CB34F00932D0D /* OCCT_SETUP.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = OCCT_SETUP.md; sourceTree = "<group>"; };
 		42D713432F6CB36500932D0D /* verify_occt.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = verify_occt.sh; sourceTree = "<group>"; };
 		42D7134B2F6CB41E00932D0D /* OpenCASCADE.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = OpenCASCADE.xcconfig; sourceTree = "<group>"; };
 		42D7134D2F6CB47900932D0D /* verify_occt.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = verify_occt.sh; sourceTree = "<group>"; };
 		42D713552F6CB50200932D0D /* pipe-macos-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "pipe-macos-Bridging-Header.h"; sourceTree = "<group>"; };
 		42D713562F6CB54100932D0D /* SETUP_GUIDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SETUP_GUIDE.md; sourceTree = "<group>"; };
 		42D713582F6CB56D00932D0D /* START_HERE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = START_HERE.md; sourceTree = "<group>"; };
-		42D7135D2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CONVERSATION_MEMORY.md; sourceTree = "<group>"; };
-		42D713672F6DACA900932D0D /* CONSTRAINTS.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CONSTRAINTS.md; sourceTree = "<group>"; };
 		42D713732F6E187A00932D0D /* GOALS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = GOALS.md; sourceTree = "<group>"; };
-		42D714512F6F3FA000932D0D /* RESEARCH.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RESEARCH.md; sourceTree = "<group>"; };
-		42D714532F6F401000932D0D /* IMPROVEMENTS.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = IMPROVEMENTS.md; sourceTree = "<group>"; };
-		42D714552F6F578500932D0D /* CODEREVIEW.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CODEREVIEW.md; sourceTree = "<group>"; };
 		A2000001 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A2000003 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -73,11 +68,14 @@
 		A2000022 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A2000032 /* GCodeGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GCodeGeneratorTests.swift; sourceTree = "<group>"; };
 		A2000033 /* STEPBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STEPBridgeTests.swift; sourceTree = "<group>"; };
+		AC000011 /* ToolpathPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolpathPipelineTests.swift; sourceTree = "<group>"; };
 		A2000034 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
-		A2000035 /* FeatureDetectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeatureDetectionTests.swift; sourceTree = "<group>"; };
-		A2000036 /* FixtureGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureGeneratorTests.swift; sourceTree = "<group>"; };
 		A3000001 /* pipe-macos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "pipe-macos.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000002 /* pipe-macosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "pipe-macosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA000002AA000002AA000002 /* ToolpathPlanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ToolpathPlanner.swift; sourceTree = "<group>"; };
+		AA000004AA000004AA000004 /* KinematicsEngine.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KinematicsEngine.swift; sourceTree = "<group>"; };
+		AA000006AA000006AA000006 /* VelocityProfiler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VelocityProfiler.swift; sourceTree = "<group>"; };
+		AA000008AA000008AA000008 /* GCodeEmitter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GCodeEmitter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -131,11 +129,7 @@
 		A5000002 /* pipe-macos */ = {
 			isa = PBXGroup;
 			children = (
-				42D714552F6F578500932D0D /* CODEREVIEW.md */,
-				42D714532F6F401000932D0D /* IMPROVEMENTS.md */,
-				42D714512F6F3FA000932D0D /* RESEARCH.md */,
 				42D713732F6E187A00932D0D /* GOALS.md */,
-				42D713672F6DACA900932D0D /* CONSTRAINTS.md */,
 				42D7135A2F6CB81C00932D0D /* examples */,
 				A5000004 /* Bridge */,
 				A2000004 /* pipe_macosApp.swift */,
@@ -148,11 +142,13 @@
 				A2000022 /* SettingsView.swift */,
 				A2000003 /* Assets.xcassets */,
 				42D713402F6CB31900932D0D /* pipe-macos-Bridging-Header.h */,
-				42D713412F6CB34F00932D0D /* OCCT_SETUP.md */,
 				42D713432F6CB36500932D0D /* verify_occt.sh */,
-				42D7135D2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md */,
 				304213ACE877C98BA3A18BA2 /* IR */,
 				2D88B36FAF85A83852AF0854 /* GCodeGenerator.swift */,
+				AA000002AA000002AA000002 /* ToolpathPlanner.swift */,
+				AA000004AA000004AA000004 /* KinematicsEngine.swift */,
+				AA000006AA000006AA000006 /* VelocityProfiler.swift */,
+				AA000008AA000008AA000008 /* GCodeEmitter.swift */,
 			);
 			path = "pipe-macos";
 			sourceTree = "<group>";
@@ -187,8 +183,7 @@
 			children = (
 				A2000032 /* GCodeGeneratorTests.swift */,
 				A2000033 /* STEPBridgeTests.swift */,
-				A2000035 /* FeatureDetectionTests.swift */,
-				A2000036 /* FixtureGeneratorTests.swift */,
+				AC000011 /* ToolpathPipelineTests.swift */,
 			);
 			path = "pipe-macosTests";
 			sourceTree = "<group>";
@@ -278,11 +273,9 @@
 			files = (
 				42D7134C2F6CB41E00932D0D /* OpenCASCADE.xcconfig in Resources */,
 				A1000003 /* Assets.xcassets in Resources */,
-				42D7135E2F6CB9AD00932D0D /* CONVERSATION_MEMORY.md in Resources */,
 				42D713592F6CB56D00932D0D /* START_HERE.md in Resources */,
 				42D713572F6CB54100932D0D /* SETUP_GUIDE.md in Resources */,
 				42D7134E2F6CB47900932D0D /* verify_occt.sh in Resources */,
-				42D713422F6CB34F00932D0D /* OCCT_SETUP.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -304,6 +297,10 @@
 				A1000020 /* CutPresetManager.swift in Sources */,
 				A1000021 /* SettingsView.swift in Sources */,
 				505BE73B3277D1530180D6E0 /* GCodeGenerator.swift in Sources */,
+				AA000001AA000001AA000001 /* ToolpathPlanner.swift in Sources */,
+				AA000003AA000003AA000003 /* KinematicsEngine.swift in Sources */,
+				AA000005AA000005AA000005 /* VelocityProfiler.swift in Sources */,
+				AA000007AA000007AA000007 /* GCodeEmitter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -313,8 +310,7 @@
 			files = (
 				A1000032 /* GCodeGeneratorTests.swift in Sources */,
 				A1000033 /* STEPBridgeTests.swift in Sources */,
-				A1000035 /* FeatureDetectionTests.swift in Sources */,
-				A1000036 /* FixtureGeneratorTests.swift in Sources */,
+				AC000010 /* ToolpathPipelineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
