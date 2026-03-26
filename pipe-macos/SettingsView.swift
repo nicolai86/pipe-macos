@@ -181,12 +181,18 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    advancedField("Linear Length", unit: "mm", value: $manager.advancedSettings.leadInDistance)
-                    advancedField("Arc Sweep", unit: "°", value: $manager.advancedSettings.leadInAngle)
-                    advancedField("Arc Radius", unit: "mm", value: $manager.advancedSettings.leadInAngleDistance)
-                    advancedField("Overburn", unit: "°", value: $manager.advancedSettings.overburnDegrees)
+                    advancedField("Hole overburn", unit: "mm",
+                                  value: $manager.advancedSettings.leadOutByHole.extensionMm)
+                    advancedField("Cutout overburn", unit: "mm",
+                                  value: $manager.advancedSettings.leadOutByCutout.extensionMm)
+                    advancedField("Notch overburn", unit: "mm",
+                                  value: $manager.advancedSettings.leadOutByNotch.extensionMm)
+                    advancedField("Sever sweep", unit: "mm",
+                                  value: $manager.advancedSettings.leadOutBySeverCut.rotationalSweepMm)
                 } header: {
-                    AdvancedSectionHeader(title: "Lead-in", info: "Shapes the entry path the torch takes before it joins the cut contour. The torch pierces at the far end of the straight segment (Linear Length), travels along it, then sweeps through an arc (Arc Sweep, Arc Radius) that blends tangentially into the cut line — keeping the rough pierce hole and any dross in the scrap zone. Overburn extends the path past the closure point to prevent a notch at torch-off. Increase Linear Length if pierce dross is landing on the finished edge; increase Overburn if you see a visible step or gap at the cut closure.")
+                    AdvancedSectionHeader(
+                        title: "Lead-Out (Overburn)",
+                        info: "These are the type-level defaults for how far the torch extends past the cut closure or sever line. Larger values give a cleaner kerf closure at the cost of slightly more heat near the start point. Per-feature overrides are set in the feature list after G-code generation.")
                 }
 
                 Section {

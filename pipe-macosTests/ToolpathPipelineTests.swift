@@ -117,14 +117,163 @@ final class ToolpathPlannerTests: XCTestCase {
     func testLeadInAddsPointsBeyondRawInput() {
         let rawCount = makeHoleFeature().rawPath.count
         var s = defaultSettings()
-        s.leadInDistance = 5
-        s.leadInAngle = 90
-        s.leadInAngleDistance = 3
+        s.leadInByHole = LeadInConfig(strategy: .tangentArc)
+        s.leadInByHole.approachLength = 3
         let result = ToolpathPlanner(settings: s).plan(
             feature: makeHoleFeature(), stock: makeRoundStock(),
             packStartX: 0, rollOffset: 0, previousMachineAm: 0)
         XCTAssertGreaterThan(result.plannedPath.points.count, rawCount,
                              "Lead-in must increase point count beyond raw feature (\(rawCount) pts)")
+    }
+
+    func testLeadInPointsAreSeparateFromCutPoints() {
+        var s = defaultSettings()
+        s.leadInByHole = LeadInConfig(strategy: .tangentArc)
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: makeHoleFeature(), stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        XCTAssertFalse(result.plannedPath.leadInPoints.isEmpty,
+                       "tangentArc strategy must produce non-empty leadInPoints")
+        XCTAssertFalse(result.plannedPath.cutPoints.isEmpty,
+                       "cut path must not be empty")
+        XCTAssertEqual(result.plannedPath.points.count,
+                       result.plannedPath.leadInPoints.count
+                           + result.plannedPath.cutPoints.count
+                           + result.plannedPath.leadOutPoints.count,
+                       "points must equal leadInPoints + cutPoints + leadOutPoints")
+    }
+
+    func testNoneStrategyProducesNoLeadIn() {
+        var s = defaultSettings()
+        s.leadInByHole = LeadInConfig(strategy: .none)
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: makeHoleFeature(), stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        XCTAssertTrue(result.plannedPath.leadInPoints.isEmpty,
+                      ".none strategy must produce empty leadInPoints")
+    }
+
+    func testCenterPierceLeadInStartsNearCentroid() {
+        var s = defaultSettings()
+        s.leadInByHole = LeadInConfig(strategy: .centerPierce)
+        let feature = makeHoleFeature(xCenter: 200, aCenter: 90, xRadius: 15, aRadius: 30)
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: feature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        guard let firstPt = result.plannedPath.leadInPoints.first else {
+            return XCTFail("centerPierce must produce lead-in points")
+        }
+        XCTAssertEqual(Double(firstPt.x), Double(feature.xCenter), accuracy: 5.0,
+                       "Center-pierce lead-in must start near feature X centroid")
+    }
+
+    // MARK: Lead-out (overburn)
+
+    func testLeadOutLinearProducesExtraPoints() {
+        var s = defaultSettings()
+        s.leadOutByHole = LeadOutConfig(strategy: .linear)
+        s.leadOutByHole.extensionMm = 5.0
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: makeHoleFeature(), stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        XCTAssertFalse(result.plannedPath.leadOutPoints.isEmpty,
+                       "linear lead-out must produce non-empty leadOutPoints")
+    }
+
+    func testLeadOutNoneProducesNoPoints() {
+        var s = defaultSettings()
+        s.leadOutByHole = LeadOutConfig(strategy: .none)
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: makeHoleFeature(), stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        XCTAssertTrue(result.plannedPath.leadOutPoints.isEmpty,
+                      ".none lead-out must produce empty leadOutPoints")
+    }
+
+    func testLeadOutPointsAreSeparateFromCutPoints() {
+        var s = defaultSettings()
+        s.leadOutByHole = LeadOutConfig(strategy: .linear)
+        s.leadOutByHole.extensionMm = 4.0
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: makeHoleFeature(), stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        XCTAssertEqual(
+            result.plannedPath.points.count,
+            result.plannedPath.leadInPoints.count
+                + result.plannedPath.cutPoints.count
+                + result.plannedPath.leadOutPoints.count,
+            "points must equal leadIn + cut + leadOut"
+        )
+    }
+
+    func testLeadOutLinearExtendsInExitDirection() {
+        // With extensionAngleDeg=0, the lead-out point should be further from the cut
+        // centroid than the last cut point, confirming the path extended outward.
+        var s = defaultSettings()
+        s.leadOutByHole = LeadOutConfig(strategy: .linear)
+        s.leadOutByHole.extensionMm = 8.0
+        s.leadOutByHole.extensionAngleDeg = 0.0
+        s.leadInByHole = LeadInConfig(strategy: .none)  // simplify to isolate lead-out
+        let feature = makeHoleFeature(xCenter: 200, aCenter: 90, xRadius: 15, aRadius: 30)
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: feature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        guard let lastCut = result.plannedPath.cutPoints.last,
+              let leadOutPt = result.plannedPath.leadOutPoints.last else {
+            return XCTFail("Need both cut and lead-out points")
+        }
+        // The lead-out point must not be identical to the last cut point
+        let dx = leadOutPt.x - lastCut.x
+        let da = leadOutPt.a - lastCut.a
+        XCTAssertGreaterThan(sqrt(dx*dx + da*da), 0.1,
+                             "lead-out point must differ from last cut point")
+    }
+
+    func testLeadOutRotationalArcSeverCut() {
+        // Rotational arc lead-out for sever cuts: X must not change, only A sweeps.
+        var s = defaultSettings()
+        s.leadOutBySeverCut = LeadOutConfig(strategy: .rotationalArc)
+        s.leadOutBySeverCut.rotationalSweepMm = 6.0
+        let sever = makeSeverFeature(type: .startCut)
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: sever, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        XCTAssertFalse(result.plannedPath.leadOutPoints.isEmpty,
+                       "rotationalArc lead-out must produce points for sever cut")
+        guard let lastCut = result.plannedPath.cutPoints.last else { return }
+        for pt in result.plannedPath.leadOutPoints {
+            XCTAssertEqual(Double(pt.x), Double(lastCut.x), accuracy: 0.5,
+                           "rotationalArc lead-out must not move X (got \(pt.x), expected \(lastCut.x))")
+        }
+    }
+
+    func testLeadOutResolverHonorsPerFeatureOverride() {
+        var s = defaultSettings()
+        // Type default: linear for holes
+        s.leadOutByHole = LeadOutConfig(strategy: .linear)
+        // Per-feature override: none
+        let feature = makeHoleFeature()
+        s.leadOutOverrides[feature.id] = LeadOutConfig(strategy: .none)
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: feature, stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        XCTAssertTrue(result.plannedPath.leadOutPoints.isEmpty,
+                      "per-feature override (.none) must suppress lead-out even when type default is .linear")
+    }
+
+    func testLeadOutNoNaNOrInfinite() {
+        var s = defaultSettings()
+        s.leadOutByHole = LeadOutConfig(strategy: .linear)
+        s.leadOutByHole.extensionMm = 5.0
+        s.enableKerfComp = true
+        s.kerfWidth = 2.0
+        let result = ToolpathPlanner(settings: s).plan(
+            feature: makeHoleFeature(), stock: makeRoundStock(),
+            packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        for pt in result.plannedPath.leadOutPoints {
+            XCTAssertFalse(pt.x.isNaN || pt.x.isInfinite, "lead-out X must be finite")
+            XCTAssertFalse(pt.a.isNaN || pt.a.isInfinite, "lead-out A must be finite")
+        }
     }
 
     // MARK: A-axis continuity
@@ -192,7 +341,7 @@ final class KinematicsEngineTests: XCTestCase {
                          initialAm: CGFloat? = nil) -> [MachinePoint] {
         let s = settings ?? bareSettings()
         let feature = GeometricFeature(id: 0, type: .hole, shape: .custom, xCenter: 0, aCenterDeg: 0, dimensions: [:], confidence: 1.0, rawPath: pts)
-        let plannedFeature = PlannedFeature(source: feature, plannedPath: PlannedPath(points: pts, isInternal: false))
+        let plannedFeature = PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: pts, leadOutPoints: [], isInternal: false))
         return KinematicsEngine(settings: s).convert(plannedFeature: plannedFeature, stock: stock, initialMachineAm: initialAm)
     }
 
@@ -480,7 +629,7 @@ final class GCodeEmitterTests: XCTestCase {
         let feature = makeHoleFeature()
         let points = makePoints()
         let segments = makeSegments()
-        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: feature.rawPath, leadOutPoints: [], isInternal: true))
         let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
         
         let lines = GCodeEmitter(settings: settings).emitFeature(
@@ -497,7 +646,7 @@ final class GCodeEmitterTests: XCTestCase {
         let feature = makeHoleFeature()
         let points = makePoints()
         let segments = makeSegments()
-        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: feature.rawPath, leadOutPoints: [], isInternal: true))
         let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
 
         let lines = GCodeEmitter(settings: defaultSettings()).emitFeature(
@@ -518,7 +667,7 @@ final class GCodeEmitterTests: XCTestCase {
         let feature = makeHoleFeature()
         let points = makePoints()
         let segments = makeSegments()
-        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: feature.rawPath, leadOutPoints: [], isInternal: true))
         let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
 
         let lines = GCodeEmitter(settings: defaultSettings()).emitFeature(
@@ -535,7 +684,7 @@ final class GCodeEmitterTests: XCTestCase {
         let feature = makeHoleFeature()
         let points = makePoints()
         let segments = makeSegments(finalF: 800)
-        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: feature.rawPath, leadOutPoints: [], isInternal: true))
         let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
 
         let lines = GCodeEmitter(settings: defaultSettings()).emitFeature(
@@ -561,7 +710,7 @@ final class GCodeEmitterTests: XCTestCase {
         let feature = makeHoleFeature()
         let points = makePoints()
         let segments = makeSegments()
-        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: feature.rawPath, leadOutPoints: [], isInternal: true))
         let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
 
         let lines = GCodeEmitter(settings: s).emitFeature(
@@ -585,7 +734,7 @@ final class GCodeEmitterTests: XCTestCase {
         let points = [cornerPierce] + flatPoints
         let segments = makeSegments(4)
         let feature = makeHoleFeature()
-        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(points: feature.rawPath, isInternal: true))
+        let planned = PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: feature.rawPath, leadOutPoints: [], isInternal: true))
         let toolpathFeature = ToolpathFeature(source: planned, machinePoints: points, segments: segments)
 
         let lines = GCodeEmitter(settings: s).emitFeature(

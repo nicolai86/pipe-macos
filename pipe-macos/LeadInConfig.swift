@@ -257,3 +257,125 @@ struct LeadInConfig: Codable, Equatable {
     /// a notch cut where a full tangent arc often cannot be inscribed.
     static let defaultNotch = LeadInConfig(strategy: .linear)
 }
+
+// MARK: - Lead-Out Strategy
+
+/// The geometric path the torch takes when leaving a cut.
+///
+/// A lead-out (sometimes called "overburn") extends the torch path past the
+/// nominal exit/closure point to ensure the kerf closes cleanly and no step
+/// or notch is left at the torch-off position.
+enum LeadOutStrategy: String, Codable, CaseIterable, Identifiable {
+
+    /// **Linear** — continue in the exit-tangent direction for a set distance.
+    ///
+    /// The torch stays on the same heading as the last cut segment. An optional
+    /// angle offset lets you veer slightly into or away from the part boundary.
+    ///
+    /// _Best for:_ holes, cutouts, notches, general overburn.
+    case linear
+
+    /// **Rotational arc** — A-axis-only sweep past the cut exit; no X movement.
+    ///
+    /// Equivalent to the rotational-arc lead-in used on sever cuts. Keeps the
+    /// torch off the stock face while it ramps down, leaving no X-axis witness
+    /// mark on the sever face.
+    ///
+    /// _Best for:_ startCut / endCut sever cuts.
+    case rotationalArc
+
+    /// **None** — torch cuts exactly to the exit point and stops.
+    ///
+    /// No overburn is applied. Acceptable only when the feature is very small
+    /// or when the controller handles the arc-off delay in hardware.
+    case none
+
+    // MARK: Display
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .linear:        return "Linear"
+        case .rotationalArc: return "Rotational arc"
+        case .none:          return "None (exact stop)"
+        }
+    }
+
+    var shortDescription: String {
+        switch self {
+        case .linear:
+            return "Extend in exit direction. Universal overburn for clean kerf closure."
+        case .rotationalArc:
+            return "A-axis sweep only past cut exit. No X movement. Use for sever cuts."
+        case .none:
+            return "Stop at exit point. No overburn — accepts visible torch-off mark."
+        }
+    }
+}
+
+// MARK: - Lead-Out Configuration
+
+/// All parameters that control lead-out (overburn) geometry for one feature or feature type.
+///
+/// `LeadOutConfig` is stored per-feature-type in `GCodeSettings` (alongside `LeadInConfig`)
+/// and can be overridden per individual feature via `GCodeSettings.leadOutOverrides`.
+/// It is passed to `ToolpathPlanner.buildLeadOut()` which appends the exit geometry
+/// to the cut path as a separate `leadOutPoints` array in `PlannedPath`.
+struct LeadOutConfig: Codable, Equatable {
+
+    var strategy: LeadOutStrategy
+
+    // -------------------------------------------------------------------------
+    // MARK: Linear  (strategy == .linear)
+    // -------------------------------------------------------------------------
+
+    /// Distance to extend past the exit point in mm. This is the "overburn"
+    /// distance — the amount by which the plasma arc sweeps past the nominal
+    /// closure or sever line. Larger values give a cleaner closure at the cost
+    /// of slightly more heat near the start/closure point.
+    ///
+    /// _Typical range:_ 1–8 mm. Default: 3 mm.
+    var extensionMm: Double = 3.0
+
+    /// Angle of the exit line relative to the cut-path exit tangent, in degrees.
+    ///
+    /// - 0°  → continue straight in the exit direction (standard overburn)
+    /// - +ve → veer towards the interior (away from kerf edge)
+    /// - -ve → veer towards the exterior
+    ///
+    /// _Typical range:_ -20°–20°. Default: 0° (straight extension).
+    var extensionAngleDeg: Double = 0.0
+
+    // -------------------------------------------------------------------------
+    // MARK: Rotational Arc  (strategy == .rotationalArc)
+    // -------------------------------------------------------------------------
+
+    /// Linear distance equivalent of the A-axis sweep past the exit point, in mm.
+    /// Converted to degrees at runtime using the tube circumference. Larger values
+    /// provide more margin for the torch to ramp down before leaving the kerf.
+    ///
+    /// _Typical range:_ 3–12 mm. Default: 5 mm.
+    var rotationalSweepMm: Double = 5.0
+
+    // -------------------------------------------------------------------------
+    // MARK: Static Defaults
+    // -------------------------------------------------------------------------
+
+    /// Default lead-out for `startCut` and `endCut` sever cuts.
+    ///
+    /// Rotational arc keeps the exit motion off the sever face — no X-axis
+    /// witness mark as the torch ramps down.
+    static let defaultSeverCut = LeadOutConfig(strategy: .rotationalArc)
+
+    /// Default lead-out for `hole` features.
+    ///
+    /// Linear extension of 3 mm closes the kerf loop cleanly.
+    static let defaultHole = LeadOutConfig(strategy: .linear)
+
+    /// Default lead-out for `cutout` features.
+    static let defaultCutout = LeadOutConfig(strategy: .linear)
+
+    /// Default lead-out for `notch` features.
+    static let defaultNotch = LeadOutConfig(strategy: .linear)
+}

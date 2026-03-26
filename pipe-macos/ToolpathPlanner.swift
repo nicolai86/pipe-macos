@@ -3,13 +3,24 @@ import Foundation
 // MARK: - Planned Path
 
 /// The result of 2D toolpath planning for a single feature.
-/// Contains the fully-prepared surface-space path (pierce-reordered,
-/// chirality-correct, kerf-offset, overburn + lead-in applied).
+/// `leadInPoints` is the approach geometry only; `cutPoints` is the actual
+/// kerf-offset, overburn-extended cut path.  They are stored separately so
+/// the UI can render them in distinct colours without re-parsing the G-code.
 struct PlannedPath {
-    let points: [ToolpathPoint]
+    /// Approach geometry — torch path from pierce position to cut-line entry.
+    /// Empty when lead-in `strategy == .none`.
+    let leadInPoints: [ToolpathPoint]
+    /// The actual cut path (kerf-offset, chirality-correct, closed at exit).
+    let cutPoints: [ToolpathPoint]
+    /// Exit geometry — torch path past the nominal exit/closure point (overburn).
+    /// Empty when lead-out `strategy == .none`.
+    let leadOutPoints: [ToolpathPoint]
     /// Whether this feature is an internal cut (hole/cutout/notch).
     /// Forwarded to the emitter for the THC/direction comment only.
     let isInternal: Bool
+
+    /// Combined path for the emitter and kinematics engine: lead-in → cut → lead-out.
+    var points: [ToolpathPoint] { leadInPoints + cutPoints + leadOutPoints }
 }
 
 /// A feature that has been through the 2D planning stage.
@@ -38,7 +49,7 @@ struct ToolpathPlanner {
     ) -> PlannedFeature {
         let localPath = feature.rawPath
         guard localPath.count > 1 else {
-            return PlannedFeature(source: feature, plannedPath: PlannedPath(points: [], isInternal: false))
+            return PlannedFeature(source: feature, plannedPath: PlannedPath(leadInPoints: [], cutPoints: [], leadOutPoints: [], isInternal: false))
         }
 
         // 1. Apply pack + roll offsets
@@ -115,31 +126,28 @@ struct ToolpathPlanner {
             )
         }
 
-        // 7. Overburn extension
-        if finalPath.count > 2 {
-            let overburnDist = settings.overburnDegrees * k
-            let pLast = finalPath.last!
-            let pPrev = finalPath[finalPath.count - 2]
-            let dx = pLast.x - pPrev.x
-            let da_mm = (pLast.a - pPrev.a) * k
-            let len = sqrt(dx * dx + da_mm * da_mm)
-            if len > 0.001 {
-                finalPath.append(ToolpathPoint(
-                    x: pLast.x + (dx / len) * overburnDist,
-                    a: ((pLast.a * k) + (da_mm / len) * overburnDist) / k
-                ))
-            }
-        }
-
-        // 8. Lead-in geometry
-        let leadInPoints = buildLeadIn(
+        // 7. Lead-in geometry
+        let leadInConfig = settings.resolveLeadInConfig(for: feature)
+        let (leadInPoints, cutPath) = buildLeadIn(
             path: finalPath, k: k,
-            isInternal: isInternal, isScrapLeft: isScrapLeft,
-            featureType: feature.type
+            config: leadInConfig,
+            isScrapLeft: isScrapLeft
         )
-        finalPath.insert(contentsOf: leadInPoints, at: 0)
 
-        return PlannedFeature(source: feature, plannedPath: PlannedPath(points: finalPath, isInternal: isInternal))
+        // 8. Lead-out geometry (overburn)
+        let leadOutConfig = settings.resolveLeadOutConfig(for: feature)
+        let leadOutPoints = buildLeadOut(
+            path: cutPath, k: k,
+            config: leadOutConfig,
+            isScrapLeft: isScrapLeft
+        )
+
+        return PlannedFeature(source: feature, plannedPath: PlannedPath(
+            leadInPoints: leadInPoints,
+            cutPoints: cutPath,
+            leadOutPoints: leadOutPoints,
+            isInternal: isInternal
+        ))
     }
 
     // MARK: - Pierce Point Selection
@@ -209,58 +217,240 @@ struct ToolpathPlanner {
 
     // MARK: - Lead-In
 
+    // MARK: - Lead-Out
+
+    /// Builds exit geometry (overburn) past the cut path's last point.
+    ///
+    /// - Returns: `leadOutPoints` to be appended after `cutPath` in the combined path.
+    ///   Empty for `.none` strategy.
+    private func buildLeadOut(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        config: LeadOutConfig,
+        isScrapLeft: Bool
+    ) -> [ToolpathPoint] {
+        guard path.count >= 2 else { return [] }
+        switch config.strategy {
+        case .linear:
+            return buildLinearLeadOut(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+        case .rotationalArc:
+            return buildRotationalArcLeadOut(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+        case .none:
+            return []
+        }
+    }
+
+    /// Extends the cut path in the exit-tangent direction by `extensionMm`, with
+    /// an optional angular deflection `extensionAngleDeg` from that tangent.
+    private func buildLinearLeadOut(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        config: LeadOutConfig,
+        isScrapLeft: Bool
+    ) -> [ToolpathPoint] {
+        let pLast = path[path.count - 1]
+        let pPrev = path[path.count - 2]
+        let dx = pLast.x - pPrev.x
+        let da_mm = (pLast.a - pPrev.a) * k
+        let len = sqrt(dx * dx + da_mm * da_mm)
+        guard len > 1e-4 else { return [] }
+
+        let gamma = atan2(da_mm, dx)
+        let angleDelta = CGFloat(config.extensionAngleDeg) * .pi / 180.0
+        let exitAngle = gamma + angleDelta
+        let dist = CGFloat(config.extensionMm)
+
+        return [ToolpathPoint(
+            x: pLast.x + dist * cos(exitAngle),
+            a: ((pLast.a * k) + dist * sin(exitAngle)) / k
+        )]
+    }
+
+    /// A-axis-only sweep past the cut exit: torch rotates without moving X.
+    /// Mirrors `buildRotationalArcLeadIn` — used for sever cuts so no X witness
+    /// mark is left on the cut face during torch ramp-down.
+    private func buildRotationalArcLeadOut(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        config: LeadOutConfig,
+        isScrapLeft: Bool
+    ) -> [ToolpathPoint] {
+        let pLast = path.last!
+        let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
+        let sweepDeg = CGFloat(config.rotationalSweepMm) / k
+        let steps = 5
+        var pts: [ToolpathPoint] = []
+        for i in 1...steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            pts.append(ToolpathPoint(x: pLast.x, a: pLast.a + sideMultiplier * sweepDeg * t))
+        }
+        return pts
+    }
+
+    // MARK: - Lead-In
+
+    /// Builds approach geometry for a feature and returns it split from the cut path.
+    ///
+    /// - Returns: `(leadIn, cutPath)` where `leadIn` is the torch approach sequence
+    ///   and `cutPath` is the (possibly reordered) cut path.  For `.none` strategy,
+    ///   `leadIn` is empty and `cutPath` == `path`.
     private func buildLeadIn(
         path: [ToolpathPoint],
         k: CGFloat,
-        isInternal: Bool,
-        isScrapLeft: Bool,
-        featureType: SurfaceFeatureType
-    ) -> [ToolpathPoint] {
+        config: LeadInConfig,
+        isScrapLeft: Bool
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
+        switch config.strategy {
+        case .rotationalArc:
+            return buildRotationalArcLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+        case .tangentArc:
+            return buildTangentArcLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+        case .linear:
+            return buildLinearLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+        case .centerPierce:
+            return buildCenterPierceLeadIn(path: path, config: config)
+        case .spiral:
+            return buildSpiralLeadIn(path: path, k: k, config: config)
+        case .none:
+            return ([], path)
+        }
+    }
+
+    /// A-axis-only sweep: torch rotates to entry position without moving X.
+    /// Used for sever cuts so no witness mark is left on the cut face.
+    private func buildRotationalArcLeadIn(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        config: LeadInConfig,
+        isScrapLeft: Bool
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
+        let p0 = path[0]
+        let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
+        let leadAngleDeg = CGFloat(config.rotationalSweepMm) / k
+        let entryA = p0.a - sideMultiplier * leadAngleDeg
+        let steps = 5
+        var leadIn: [ToolpathPoint] = []
+        for i in 0..<steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            leadIn.append(ToolpathPoint(x: p0.x, a: entryA + sideMultiplier * leadAngleDeg * t))
+        }
+        return (leadIn, path)
+    }
+
+    /// Circular arc tangent to the cut path at the pierce point.
+    /// Prepended with a straight approach segment of `approachLength` mm.
+    private func buildTangentArcLeadIn(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        config: LeadInConfig,
+        isScrapLeft: Bool
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
         let p0 = path[0]
         let p1 = path.count > 1 ? path[1] : ToolpathPoint(x: p0.x + 1, a: p0.a)
         let dx = p1.x - p0.x
         let da_mm = (p1.a - p0.a) * k
         let gamma = atan2(da_mm, dx)
-        let leadR = settings.leadInAngleDistance
-        let leadTheta = settings.leadInAngle * .pi / 180.0
-        let leadL = settings.leadInDistance
+        let leadR    = CGFloat(config.arcRadius)
+        let leadTheta = CGFloat(config.arcAngleDeg) * .pi / 180.0
+        let leadL    = CGFloat(config.approachLength)
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
-        var points: [ToolpathPoint] = []
 
-        if featureType == .startCut || featureType == .endCut {
-            // Purely rotational lead-in for sever cuts — moving in X would waste stock
-            let leadAngleDeg = (leadL + leadR) / k
-            let entryA = p0.a - sideMultiplier * leadAngleDeg
-            let steps = 5
-            for i in 0..<steps {
-                let t = CGFloat(i) / CGFloat(steps)
-                points.append(ToolpathPoint(x: p0.x, a: entryA + sideMultiplier * leadAngleDeg * t))
-            }
-        } else if leadTheta > 0.01 && leadR > 0.01 {
-            let Cx = p0.x + leadR * cos(gamma + sideMultiplier * .pi / 2.0)
-            let Cy = (p0.a * k) + leadR * sin(gamma + sideMultiplier * .pi / 2.0)
-            let startAngle = (gamma - sideMultiplier * .pi / 2.0) - sideMultiplier * leadTheta
-            let arcSteps = max(4, Int(leadTheta * 180 / .pi / 15))
-            for i in 0..<arcSteps {
-                let t = startAngle + sideMultiplier * (leadTheta * CGFloat(i) / CGFloat(arcSteps))
-                points.append(ToolpathPoint(
-                    x: Cx + leadR * cos(t),
-                    a: (Cy + leadR * sin(t)) / k
-                ))
-            }
-            let firstArcPt = points.first ?? p0
-            let entryTangent = gamma - sideMultiplier * leadTheta
-            points.insert(ToolpathPoint(
-                x: firstArcPt.x - leadL * cos(entryTangent),
-                a: ((firstArcPt.a * k) - leadL * sin(entryTangent)) / k
-            ), at: 0)
-        } else {
-            points.append(ToolpathPoint(
-                x: p0.x - leadL * cos(gamma),
-                a: ((p0.a * k) - leadL * sin(gamma)) / k
+        guard leadTheta > 0.01 && leadR > 0.01 else {
+            return buildLinearLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+        }
+
+        let Cx = p0.x + leadR * cos(gamma + sideMultiplier * .pi / 2.0)
+        let Cy = (p0.a * k) + leadR * sin(gamma + sideMultiplier * .pi / 2.0)
+        let startAngle = (gamma - sideMultiplier * .pi / 2.0) - sideMultiplier * leadTheta
+        let arcSteps = max(4, Int(leadTheta * 180 / .pi / 15))
+        var arcPts: [ToolpathPoint] = []
+        for i in 0..<arcSteps {
+            let t = startAngle + sideMultiplier * (leadTheta * CGFloat(i) / CGFloat(arcSteps))
+            arcPts.append(ToolpathPoint(
+                x: Cx + leadR * cos(t),
+                a: (Cy + leadR * sin(t)) / k
             ))
         }
-        return points
+        let firstArcPt = arcPts.first ?? p0
+        let entryTangent = gamma - sideMultiplier * leadTheta
+        let straightPt = ToolpathPoint(
+            x: firstArcPt.x - leadL * cos(entryTangent),
+            a: ((firstArcPt.a * k) - leadL * sin(entryTangent)) / k
+        )
+        return ([straightPt] + arcPts, path)
+    }
+
+    /// Straight angled line approaching the cut path from outside.
+    private func buildLinearLeadIn(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        config: LeadInConfig,
+        isScrapLeft: Bool
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
+        let p0 = path[0]
+        let p1 = path.count > 1 ? path[1] : ToolpathPoint(x: p0.x + 1, a: p0.a)
+        let dx = p1.x - p0.x
+        let da_mm = (p1.a - p0.a) * k
+        let gamma = atan2(da_mm, dx)
+        let leadL = CGFloat(config.linearLength)
+        let angleDelta = CGFloat(config.linearAngleDeg) * .pi / 180.0
+        let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
+        let approachAngle = gamma - sideMultiplier * angleDelta
+        let pt = ToolpathPoint(
+            x: p0.x - leadL * cos(approachAngle),
+            a: ((p0.a * k) - leadL * sin(approachAngle)) / k
+        )
+        return ([pt], path)
+    }
+
+    /// Pierce at the feature centroid, then run a straight line to the cut-path start.
+    /// The pierce mark lands safely inside the scrap area, away from the kerf edge.
+    private func buildCenterPierceLeadIn(
+        path: [ToolpathPoint],
+        config: LeadInConfig
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
+        guard path.count >= 2 else { return ([], path) }
+        let cx = path.map(\.x).reduce(0, +) / CGFloat(path.count)
+        let ca = path.map(\.a).reduce(0, +) / CGFloat(path.count)
+        let steps = max(2, config.centerPierceSteps)
+        let p0 = path[0]
+        var leadIn: [ToolpathPoint] = []
+        for i in 0..<steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            leadIn.append(ToolpathPoint(x: cx + t * (p0.x - cx), a: ca + t * (p0.a - ca)))
+        }
+        return (leadIn, path)
+    }
+
+    /// Archimedean spiral from the feature centroid outward to the cut-path start.
+    /// Produces a smoother velocity ramp-up than a straight center-pierce approach.
+    private func buildSpiralLeadIn(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        config: LeadInConfig
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
+        guard path.count >= 2 else { return ([], path) }
+        let cx = path.map(\.x).reduce(0, +) / CGFloat(path.count)
+        let ca = path.map(\.a).reduce(0, +) / CGFloat(path.count)
+        let p0 = path[0]
+        let dx = p0.x - cx
+        let da_mm = (p0.a - ca) * k
+        let rMax = sqrt(dx * dx + da_mm * da_mm)
+        guard rMax > 1e-3 else { return buildCenterPierceLeadIn(path: path, config: config) }
+
+        let totalAngle = CGFloat(config.spiralTurns) * 2.0 * .pi
+        let steps = max(8, config.spiralSteps)
+        var leadIn: [ToolpathPoint] = []
+        for i in 0..<steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            let r = rMax * t
+            let theta = totalAngle * t
+            leadIn.append(ToolpathPoint(
+                x: cx + r * cos(theta),
+                a: ca + (r * sin(theta)) / k
+            ))
+        }
+        return (leadIn, path)
     }
 
     // MARK: - HSS Geodesic Arc-Length Profile

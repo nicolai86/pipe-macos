@@ -31,10 +31,10 @@ struct DisplaySettings: Codable {
 struct AdvancedSettings: Codable {
     var rapidRate: Double = 3000.0
     var safeHeight: Double = 25.0
-    var leadInDistance: Double = 5.0
-    var leadInAngle: Double = 90.0
-    var leadInAngleDistance: Double = 3.0
-    var overburnDegrees: Double = 10.0
+    var leadOutBySeverCut: LeadOutConfig = .defaultSeverCut
+    var leadOutByHole:     LeadOutConfig = .defaultHole
+    var leadOutByCutout:   LeadOutConfig = .defaultCutout
+    var leadOutByNotch:    LeadOutConfig = .defaultNotch
     var enableKerfComp: Bool = true
     var useSimCNC: Bool = true
     // The Issue: You mentioned that IHS and drops to cut-height are delegated to SimCNC's M3 macro. But on HSS (square/rectangular) tubing, your offline TCP interpolation means the G-code is actively commanding constant Z-axis oscillation to track the flat faces and corners as the A-axis rotates. If SimCNC’s Torch Height Control (THC) is active, it will read arc voltage and try to adjust the Z-axis at the same time your G-code is commanding Z-moves. This creates a dual-loop control conflict that will cause the Z-axis to oscillate wildly or dive into the material. The Fix: * Dynamic THC Toggling: Pipe macOS needs to inject THC ON/OFF macros (or utilize SimCNC's specific anti-dive/corner-lock I/O signals) dynamically.
@@ -98,10 +98,10 @@ class CutPresetManager: ObservableObject {
         }
         s.rapidRate           = CGFloat(advancedSettings.rapidRate)
         s.safeHeight          = CGFloat(advancedSettings.safeHeight)
-        s.leadInDistance      = CGFloat(advancedSettings.leadInDistance)
-        s.leadInAngle         = CGFloat(advancedSettings.leadInAngle)
-        s.leadInAngleDistance = CGFloat(advancedSettings.leadInAngleDistance)
-        s.overburnDegrees     = CGFloat(advancedSettings.overburnDegrees)
+        s.leadOutBySeverCut   = advancedSettings.leadOutBySeverCut
+        s.leadOutByHole       = advancedSettings.leadOutByHole
+        s.leadOutByCutout     = advancedSettings.leadOutByCutout
+        s.leadOutByNotch      = advancedSettings.leadOutByNotch
         s.enableKerfComp      = advancedSettings.enableKerfComp
         s.useSimCNC           = advancedSettings.useSimCNC
         s.enableDynamicTHC       = advancedSettings.enableDynamicTHC

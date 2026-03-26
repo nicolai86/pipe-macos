@@ -186,26 +186,33 @@ struct SidePanelView: View {
                 Divider()
 
                 if let selection = viewModel.selectedShape {
-                    if let summary = viewModel.selectedShapeSummary {
-                        Text(summary)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    // ── Compact stock summary ─────────────────────────────
+                    if let stock = selection.stockInfo {
+                        StockSummaryRow(stock: stock)
                     }
 
+                    // ── Actions ───────────────────────────────────────────
                     if let shapeData = selection.shapeData, shapeData.isCuttable {
-                        Button("Generate GCode") {
-                            viewModel.generateGCode(for: selection)
-                        }
-                        .buttonStyle(.borderedProminent)
+                        HStack {
+                            Button("Generate GCode") {
+                                viewModel.generateGCode(for: selection)
+                            }
+                            .buttonStyle(.borderedProminent)
 
-                        Button("Deselect") {
-                            viewModel.selectShape(nil)
+                            Button("Deselect") {
+                                viewModel.selectShape(nil)
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.bordered)
                     }
 
-                    // Matching shapes section
+                    // ── Feature list with inline lead-in config ───────────
+                    if let stock = selection.stockInfo, !stock.features.isEmpty {
+                        Divider()
+                        FeatureListView(viewModel: viewModel, features: stock.features)
+                    }
+
+                    // ── Matching shapes ───────────────────────────────────
                     if !viewModel.matchingShapes.isEmpty {
                         Divider()
 
@@ -237,10 +244,7 @@ struct SidePanelView: View {
                                 .cornerRadius(4)
                                 .contentShape(Rectangle())
                                 .onHover { hovering in
-                                    if hovering {
-                                        viewModel.hoveredShape = shape
-                                    }
-                                    // Don't clear on hover-end — highlight persists in 3D view.
+                                    if hovering { viewModel.hoveredShape = shape }
                                 }
                                 if idx < viewModel.matchingShapes.count - 1 {
                                     Divider().opacity(0.4)
@@ -271,6 +275,47 @@ struct SidePanelView: View {
             }
             .padding()
         }
+    }
+}
+
+// MARK: - Compact stock info row
+
+private struct StockSummaryRow: View {
+    let stock: StockInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Label(stock.profile.rawValue.capitalized, systemImage: profileIcon)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                Spacer()
+                Text(sizeLabel)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            Text("L \(String(format: "%.1f", stock.length)) mm")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
+        .padding(8)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(6)
+    }
+
+    private var profileIcon: String {
+        switch stock.profile {
+        case .round: return "circle"
+        case .square, .rectangular: return "square"
+        case .unknown: return "questionmark"
+        }
+    }
+
+    private var sizeLabel: String {
+        if stock.profile == .round {
+            return "Ø\(String(format: "%.1f", stock.od ?? 0)) mm"
+        }
+        return "\(String(format: "%.0f", stock.odX ?? 0))×\(String(format: "%.0f", stock.odY ?? 0)) mm"
     }
 }
 
@@ -330,6 +375,19 @@ class AppViewModel: ObservableObject {
     @Published var currentPackCount: Int = 1
     /// The matching shape currently highlighted via sidebar hover (persists when moving into 3D view).
     @Published var hoveredShape: SelectedShape?
+    /// Planned features for the currently-selected stock, used to render the
+    /// lead-in (orange) and cut-path (cyan) overlays in the 3D view.
+    @Published var toolpathOverlay: [PlannedFeature] = []
+    @Published var overlayStock: StockInfo?
+    /// Incremented each time toolpathOverlay is rebuilt; lets the 3D view detect re-generation
+    /// even when the feature count stays the same.
+    @Published var toolpathOverlayGeneration: Int = 0
+    /// The feature currently selected in the sidebar lead-in config panel.
+    @Published var selectedFeatureID: Int?
+    /// Per-feature lead-in overrides edited by the user in the config panel.
+    @Published var featureLeadInOverrides: [Int: LeadInConfig] = [:]
+    /// Per-feature lead-out (overburn) overrides edited by the user in the config panel.
+    @Published var featureLeadOutOverrides: [Int: LeadOutConfig] = [:]
     private var simTimer: Timer?
     private var simTotalLength: Float = 0
     private var simStockRadius: Float = 30.0
@@ -367,6 +425,102 @@ class AppViewModel: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    // MARK: - Feature Lead-In Config
+
+    /// Selects a feature by ID for the lead-in config panel (nil = deselect).
+    func selectFeature(_ featureID: Int?) {
+        selectedFeatureID = featureID
+        // Trigger overlay rebuild so the selected feature gets highlighted.
+        toolpathOverlayGeneration += 1
+    }
+
+    /// Returns the resolved lead-in config for a feature, including any per-feature override.
+    func resolvedLeadInConfig(for feature: GeometricFeature) -> LeadInConfig {
+        if let override = featureLeadInOverrides[feature.id] { return override }
+        return makeGCodeSettings().resolveLeadInConfig(for: feature)
+    }
+
+    /// The strategy that would be auto-selected for this feature based solely on
+    /// its type and size — ignoring any per-feature override.
+    func suggestedLeadInStrategy(for feature: GeometricFeature) -> LeadInStrategy {
+        let s = makeGCodeSettings()
+        switch feature.type {
+        case .startCut, .endCut:
+            return s.leadInBySeverCut.strategy
+        case .hole:
+            let d = feature.dimensions["diameter"] ?? feature.dimensions["width"] ?? 0
+            return d < CGFloat(s.smallHoleDiameterThreshold)
+                ? .centerPierce : s.leadInByHole.strategy
+        case .cutout:
+            return s.leadInByCutout.strategy
+        case .notch:
+            return s.leadInByNotch.strategy
+        }
+    }
+
+    /// Stores a per-feature lead-in override and immediately re-plans the overlay.
+    func setLeadInOverride(_ config: LeadInConfig, forFeatureID id: Int) {
+        featureLeadInOverrides[id] = config
+        regenerateOverlay()
+    }
+
+    /// Clears a per-feature lead-in override and regenerates the overlay with the type default.
+    func resetLeadInOverride(forFeatureID id: Int) {
+        featureLeadInOverrides.removeValue(forKey: id)
+        regenerateOverlay()
+    }
+
+    /// Stores a per-feature lead-out override and immediately re-plans the overlay.
+    func setLeadOutOverride(_ config: LeadOutConfig, forFeatureID id: Int) {
+        featureLeadOutOverrides[id] = config
+        regenerateOverlay()
+    }
+
+    /// Clears a per-feature lead-out override and regenerates the overlay with the type default.
+    func resetLeadOutOverride(forFeatureID id: Int) {
+        featureLeadOutOverrides.removeValue(forKey: id)
+        regenerateOverlay()
+    }
+
+    /// Returns the resolved lead-out config for a feature, including any per-feature override.
+    func resolvedLeadOutConfig(for feature: GeometricFeature) -> LeadOutConfig {
+        if let override = featureLeadOutOverrides[feature.id] { return override }
+        return makeGCodeSettings().resolveLeadOutConfig(for: feature)
+    }
+
+    /// The lead-out strategy that would be auto-selected for this feature based
+    /// solely on its type — ignoring any per-feature override.
+    func suggestedLeadOutStrategy(for feature: GeometricFeature) -> LeadOutStrategy {
+        makeGCodeSettings().resolveLeadOutConfig(for: feature).strategy
+    }
+
+    /// Rebuilds the toolpath overlay using the current settings + per-feature overrides.
+    /// Called automatically when any override changes; also called from `generateGCode`.
+    func regenerateOverlay() {
+        guard let shape = selectedShape, let stockInfo = shape.stockInfo else { return }
+        let generator = makeGeneratorWithOverrides()
+        toolpathOverlay = generator.planFeaturesForOverlay(for: stockInfo)
+        overlayStock = stockInfo
+        toolpathOverlayGeneration += 1
+    }
+
+    // MARK: - Private helpers
+
+    /// Base `GCodeSettings` from presets, without per-feature overrides applied.
+    private func makeGCodeSettings() -> GCodeSettings {
+        CutPresetManager.shared.currentGCodeSettings()
+    }
+
+    /// Generator with preset settings and current per-feature lead-in + lead-out overrides merged in.
+    private func makeGeneratorWithOverrides() -> GCodeGenerator {
+        let generator = GCodeGenerator()
+        var s = makeGCodeSettings()
+        for (id, config) in featureLeadInOverrides  { s.leadInOverrides[id]  = config }
+        for (id, config) in featureLeadOutOverrides { s.leadOutOverrides[id] = config }
+        generator.settings = s
+        return generator
+    }
+
     func shapeOverride(for shape: SelectedShape) -> ShapeOverride {
         shapeOverrides[shape.id] ?? ShapeOverride()
     }
@@ -387,18 +541,29 @@ class AppViewModel: ObservableObject {
 
     // Called from the main thread (gesture recognizer callback) — no async dispatch needed.
     func selectShape(_ shape: SelectedShape?) {
+        let previousShape = selectedShape
         selectedShape = shape
-        hoveredShape = nil          // new click clears any sidebar hover
+        hoveredShape = nil
+        // Clear feature-level selection when switching to a different shape
+        if shape != previousShape {
+            selectedFeatureID = nil
+        }
         guard let selected = shape, let stock = selected.stockInfo,
               let all = loadedModel?.selectableShapes else {
             matchingShapes = []
             packSceneBundle = nil
+            toolpathOverlay = []
+            overlayStock = nil
+            toolpathOverlayGeneration += 1
             stopSim()
             return
         }
         matchingShapes = all.filter { other in
             other != selected && other.stockInfo.map { profileMatches(stock, $0) } == true
         }
+        // Populate the 3D overlay immediately so lead-ins/lead-outs are visible
+        // without requiring the user to click "Generate GCode" first.
+        regenerateOverlay()
         // Defer so SwiftUI commits selectedShape + matchingShapes in one pass
         // before the pack scene (which depends on both) is built.
         DispatchQueue.main.async { [weak self] in self?.buildPackScene() }
@@ -439,6 +604,12 @@ class AppViewModel: ObservableObject {
                 self.generatedGCode = nil
                 self.packSceneBundle = nil
                 self.shapeOverrides = [:]
+                self.toolpathOverlay = []
+                self.overlayStock = nil
+                self.selectedFeatureID = nil
+                self.featureLeadInOverrides = [:]
+                self.featureLeadOutOverrides = [:]
+                self.toolpathOverlayGeneration += 1
                 self.loadedModel = model
             }
         } else {
@@ -514,15 +685,16 @@ class AppViewModel: ObservableObject {
 
     // Update: Generates G-code for a selected shape with roll alignment
     func generateGCode(for shape: SelectedShape) {
-        let generator = GCodeGenerator()
-        generator.settings = CutPresetManager.shared.currentGCodeSettings()
-        
         guard let stockInfo = shape.stockInfo else {
             print("Cannot generate G-code: No stock information available")
             return
         }
-        
+
+        let generator = makeGeneratorWithOverrides()
         generatedGCode = generator.generateGCode(for: stockInfo)
+        toolpathOverlay = generator.planFeaturesForOverlay(for: stockInfo)
+        overlayStock = stockInfo
+        toolpathOverlayGeneration += 1
         NotificationCenter.default.post(name: .saveGCode, object: nil)
     }
     

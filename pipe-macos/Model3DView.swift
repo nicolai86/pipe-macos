@@ -1,9 +1,10 @@
 import SwiftUI
 import SceneKit
+import simd
 
 struct Model3DView: View {
     @ObservedObject var viewModel: AppViewModel
-    
+
     var body: some View {
         SceneKitView(viewModel: viewModel)
             .background(Color.gray.opacity(0.2))
@@ -98,6 +99,16 @@ struct SceneKitView: NSViewRepresentable {
             in: scnView
         )
 
+        // Update toolpath overlay whenever generation counter or selected feature changes
+        let overlayGen = viewModel.toolpathOverlayGeneration
+        let selFID = viewModel.selectedFeatureID
+        if context.coordinator.lastOverlayGeneration != overlayGen
+            || context.coordinator.lastSelectedFeatureID != selFID {
+            context.coordinator.lastOverlayGeneration = overlayGen
+            context.coordinator.lastSelectedFeatureID = selFID
+            rebuildToolpathOverlay(in: scnView, viewModel: viewModel)
+        }
+
         scnView.needsDisplay = true
     }
     
@@ -128,6 +139,166 @@ struct SceneKitView: NSViewRepresentable {
         scene.rootNode.addChildNode(ambientLightNode)
     }
     
+    // MARK: - Toolpath Overlay
+
+    /// Rebuilds the lead-in (orange) and cut-path (cyan) tube overlays on the tube surface.
+    /// When a feature is selected, it is rendered full-brightness and others are dimmed.
+    private func rebuildToolpathOverlay(in scnView: SCNView, viewModel: AppViewModel) {
+        guard let scene = scnView.scene else { return }
+
+        // Remove existing overlay nodes
+        scene.rootNode.enumerateChildNodes { node, _ in
+            if node.name?.hasPrefix("overlay_") == true { node.removeFromParentNode() }
+        }
+
+        guard let stock = viewModel.overlayStock, !viewModel.toolpathOverlay.isEmpty else { return }
+
+        let vAxis = SIMD3<Float>(
+            stock.axis.y * stock.uAxis.z - stock.axis.z * stock.uAxis.y,
+            stock.axis.z * stock.uAxis.x - stock.axis.x * stock.uAxis.z,
+            stock.axis.x * stock.uAxis.y - stock.axis.y * stock.uAxis.x
+        )
+        let normV = sqrt(vAxis.x*vAxis.x + vAxis.y*vAxis.y + vAxis.z*vAxis.z)
+        let vAxisN = normV > 1e-6 ? vAxis / normV : SIMD3<Float>(0, 0, 1)
+
+        let selectedID = viewModel.selectedFeatureID
+        let hasSelection = selectedID != nil
+
+        for planned in viewModel.toolpathOverlay {
+            let fid = planned.source.id
+            let isSelected = fid == selectedID
+            // Selected: full brightness + thicker tubes; others: dim
+            let alpha: CGFloat = hasSelection ? (isSelected ? 1.0 : 0.18) : 0.85
+            let radius: CGFloat = isSelected ? 1.0 : 0.6
+
+            // Lead-in — orange (selected: gold)
+            if !planned.plannedPath.leadInPoints.isEmpty {
+                let pts = planned.plannedPath.leadInPoints.map { pt in
+                    surfacePoint(x: Float(pt.x), aDeg: Float(pt.a), stock: stock, vAxis: vAxisN)
+                }
+                let color = isSelected
+                    ? NSColor(red: 1.0, green: 0.75, blue: 0.0, alpha: alpha)
+                    : NSColor.orange.withAlphaComponent(alpha)
+                if let node = makeLineNode(points: pts, color: color, tubeRadius: radius) {
+                    node.name = "overlay_leadin_\(fid)"
+                    scene.rootNode.addChildNode(node)
+                }
+            }
+
+            // Cut path — cyan (selected: bright white-cyan)
+            if !planned.plannedPath.cutPoints.isEmpty {
+                let pts = planned.plannedPath.cutPoints.map { pt in
+                    surfacePoint(x: Float(pt.x), aDeg: Float(pt.a), stock: stock, vAxis: vAxisN)
+                }
+                let color = isSelected
+                    ? NSColor(red: 0.4, green: 1.0, blue: 1.0, alpha: alpha)
+                    : NSColor.cyan.withAlphaComponent(alpha)
+                if let node = makeLineNode(points: pts, color: color, tubeRadius: radius) {
+                    node.name = "overlay_cut_\(fid)"
+                    scene.rootNode.addChildNode(node)
+                }
+            }
+
+            // Lead-out — lime green (selected: bright yellow-green)
+            if !planned.plannedPath.leadOutPoints.isEmpty {
+                // Prepend last cut point so the lead-out tube starts from the cut exit
+                let exitPt = planned.plannedPath.cutPoints.last ?? planned.plannedPath.leadOutPoints[0]
+                let leadOutPts = [exitPt] + planned.plannedPath.leadOutPoints
+                let pts = leadOutPts.map { pt in
+                    surfacePoint(x: Float(pt.x), aDeg: Float(pt.a), stock: stock, vAxis: vAxisN)
+                }
+                let color = isSelected
+                    ? NSColor(red: 0.6, green: 1.0, blue: 0.2, alpha: alpha)
+                    : NSColor(red: 0.4, green: 0.9, blue: 0.1, alpha: alpha)
+                if let node = makeLineNode(points: pts, color: color, tubeRadius: radius) {
+                    node.name = "overlay_leadout_\(fid)"
+                    scene.rootNode.addChildNode(node)
+                }
+            }
+        }
+    }
+
+    /// Maps a surface-space `(x, aDeg)` point to a 3D world position on the tube surface.
+    private func surfacePoint(
+        x: Float, aDeg: Float, stock: StockInfo, vAxis: SIMD3<Float>
+    ) -> SCNVector3 {
+        let aRad = aDeg * Float.pi / 180.0
+        // x is in [0, length] local stock space; convert to axial offset from tube centre
+        let axial = x - Float(stock.length) / 2.0
+
+        let r: Float
+        if stock.profile == .round {
+            r = Float((stock.od ?? 50.0) / 2.0)
+        } else {
+            // Rectangular: intersect the direction vector with the rectangular hull
+            let hw = Float((stock.odX ?? 50.0) / 2.0)
+            let hh = Float((stock.odY ?? 50.0) / 2.0)
+            let cosA = cos(aRad), sinA = sin(aRad)
+            let tu = abs(cosA) > 1e-4 ? hw / abs(cosA) : Float.greatestFiniteMagnitude
+            let tv = abs(sinA) > 1e-4 ? hh / abs(sinA) : Float.greatestFiniteMagnitude
+            r = min(tu, tv)
+        }
+
+        let p = stock.origin
+            + stock.axis * axial
+            + stock.uAxis * (r * cos(aRad))
+            + vAxis * (r * sin(aRad))
+        // Raise slightly off the surface so the overlay is always visible
+        let normal = stock.uAxis * cos(aRad) + vAxis * sin(aRad)
+        let lifted = p + normal * 0.5
+        return SCNVector3(lifted.x, lifted.y, lifted.z)
+    }
+
+    /// Creates an SCNNode containing thin cylinder tubes between consecutive `points`.
+    /// SCNGeometry `.line` primitives are 1 px in Metal and effectively invisible;
+    /// cylinders are reliably rendered at any zoom level.
+    private func makeLineNode(points: [SCNVector3], color: NSColor, tubeRadius: CGFloat = 0.6) -> SCNNode? {
+        guard points.count >= 2 else { return nil }
+
+        let mat = SCNMaterial()
+        mat.diffuse.contents = color
+        mat.isDoubleSided = true
+        mat.lightingModel = .constant
+
+        let parent = SCNNode()
+        for i in 0..<points.count - 1 {
+            let a = points[i]
+            let b = points[i + 1]
+            let dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z
+            let length = CGFloat(sqrt(dx*dx + dy*dy + dz*dz))
+            guard length > 1e-4 else { continue }
+
+            let cyl = SCNCylinder(radius: tubeRadius, height: length)
+            cyl.materials = [mat]
+            let seg = SCNNode(geometry: cyl)
+
+            // Position at midpoint
+            seg.position = SCNVector3(
+                (a.x + b.x) / 2,
+                (a.y + b.y) / 2,
+                (a.z + b.z) / 2
+            )
+
+            // Rotate default Y-axis cylinder to align with the segment direction
+            let dir = SIMD3<Float>(Float(dx), Float(dy), Float(dz)) / Float(length)
+            let yAxis = SIMD3<Float>(0, 1, 0)
+            let cross = simd_cross(yAxis, dir)
+            let crossLen = simd_length(cross)
+            if crossLen > 1e-6 {
+                let angle = Float(asin(min(1.0, Double(crossLen))))
+                let dot = simd_dot(yAxis, dir)
+                let finalAngle = dot < 0 ? Float.pi - angle : angle
+                seg.rotation = SCNVector4(cross.x / crossLen, cross.y / crossLen, cross.z / crossLen, finalAngle)
+            } else if simd_dot(yAxis, dir) < 0 {
+                // Anti-parallel: rotate 180° around X
+                seg.rotation = SCNVector4(1, 0, 0, Float.pi)
+            }
+
+            parent.addChildNode(seg)
+        }
+        return parent
+    }
+
     private func addAxes(to node: SCNNode) {
         let axisLength: CGFloat = 100.0
         let axisThickness: CGFloat = 1.0
@@ -156,6 +327,10 @@ class Coordinator: NSObject {
     var scnView: SCNView?
     var viewModel: AppViewModel?
     var currentModelURL: URL?
+    /// Tracks the last rendered overlay generation so we only rebuild when it changes.
+    var lastOverlayGeneration: Int = -1
+    /// Tracks the last selected feature ID so we rebuild highlighting when selection changes.
+    var lastSelectedFeatureID: Int? = nil
     
     func isCurrentModel(_ model: Model3D?) -> Bool {
         return currentModelURL == model?.url

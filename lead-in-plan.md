@@ -38,7 +38,7 @@ settings persistence and SwiftUI binding.
 
 **File:** `pipe-macos/LeadInConfig.swift`
 
-### Step 2 — `GCodeSettings` migration
+### Step 2 — `GCodeSettings` migration ✅
 
 Replace the three flat scalars with per-type configs and a per-feature override dict:
 
@@ -61,7 +61,7 @@ var leadInOverrides: [Int: LeadInConfig] = [:]
 Backwards-compatible: keep the old scalars as `@available(*, deprecated)` aliases
 for one cycle, or just update all call sites (they're internal).
 
-### Step 3 — `PlannedPath` split
+### Step 3 — `PlannedPath` split ✅
 
 Add `leadInPoints` so the UI can render lead-in geometry separately from the cut path:
 
@@ -75,7 +75,7 @@ struct PlannedPath {
 
 The emitter concatenates `leadInPoints + cutPoints` as before — no emitter changes needed.
 
-### Step 4 — `ToolpathPlanner.buildLeadIn()` refactor
+### Step 4 — `ToolpathPlanner.buildLeadIn()` refactor ✅
 
 ```swift
 private static func buildLeadIn(
@@ -100,7 +100,7 @@ case .none:           return ([], path)
 }
 ```
 
-### Step 5 — Config resolver in `GCodeGenerator`
+### Step 5 — Config resolver in `GCodeGenerator` ✅
 
 ```swift
 func resolveLeadInConfig(for feature: GeometricFeature, settings: GCodeSettings) -> LeadInConfig {
@@ -124,7 +124,7 @@ func resolveLeadInConfig(for feature: GeometricFeature, settings: GCodeSettings)
 }
 ```
 
-### Step 6 — Center-pierce geometry
+### Step 6 — Center-pierce geometry ✅
 
 New geometry for `centerPierce` strategy:
 
@@ -157,7 +157,7 @@ private static func buildCenterPierceLeadIn(
 }
 ```
 
-### Step 7 — Spiral geometry
+### Step 7 — Spiral geometry ✅
 
 Archimedean spiral from centroid outward to the cut-path radius, with continuously
 increasing angular step size to maintain constant arc-length per segment:
@@ -173,21 +173,21 @@ private static func buildSpiralLeadIn(
 }
 ```
 
-### Step 8 — UI
+### Step 8 — UI (partial ✅)
 
-**Feature detail panel additions:**
+**3D overlay (implemented):**
+- `AppViewModel.toolpathOverlay: [PlannedFeature]` and `overlayStock: StockInfo?` populated on G-code generation
+- `toolpathOverlayGeneration: Int` counter incremented on each rebuild (and on model load/clear) for reliable change detection
+- `Model3DView.rebuildToolpathOverlay` projects surface `(X, A)` → world-space 3D using `stock.origin`, `stock.axis`, `stock.uAxis`, and computed `vAxis`
+- Lead-in segments rendered **orange**, cut-path segments rendered **cyan**
+- Geometry uses thin `SCNCylinder` tubes (radius 0.6 mm) between consecutive points — visible at all zoom levels in Metal
+- Overlay cleared when a new model is loaded
 
-- Lead-in path rendered as dashed overlay on the 2D surface preview
-  (orange for lead-in, blue for cut path)
-- Per-feature strategy picker (appears when feature is selected)
-- Conditional parameter sliders (only show params relevant to chosen strategy)
-- "Auto" badge shown when no override is set (using type-level default)
-
-**Settings panel additions:**
-
-- Per-type default strategy selector (one row per feature type)
-- Small-hole diameter threshold slider
-- Parameter editors per type
+**Pending:**
+- Per-feature strategy picker in the feature detail panel
+- Conditional parameter sliders per strategy
+- "Auto" badge when using type-level default
+- Per-type defaults and threshold slider in Settings panel
 
 ---
 
@@ -209,8 +209,8 @@ private static func buildSpiralLeadIn(
 ## Implementation Order
 
 1. `LeadInConfig.swift` — pure data, no dependencies ✅
-2. `GCodeSettings` migration — keep defaults, add new fields
-3. `ToolpathPlanner` refactor — split return type, add strategy dispatch
-4. New geometry: `centerPierce` and `spiral`
-5. Unit tests for each strategy and the auto-select resolver
-6. UI: overlay render (read-only) → config panel
+2. `GCodeSettings` migration — keep defaults, add new fields ✅
+3. `ToolpathPlanner` refactor — split return type, add strategy dispatch ✅
+4. New geometry: `centerPierce` and `spiral` ✅
+5. Unit tests for each strategy and the auto-select resolver ✅
+6. UI: overlay render (3D cylinders, orange/cyan) ✅ — config panel pending

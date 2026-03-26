@@ -23,10 +23,11 @@
 		A100001F /* STEPBridgeWrapper.m in Sources */ = {isa = PBXBuildFile; fileRef = A2000020 /* STEPBridgeWrapper.m */; };
 		A1000020 /* CutPresetManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000021 /* CutPresetManager.swift */; };
 		A1000021 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000022 /* SettingsView.swift */; };
-		A1000036 /* LeadInConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000036 /* LeadInConfig.swift */; };
 		A1000032 /* GCodeGeneratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000032 /* GCodeGeneratorTests.swift */; };
 		A1000033 /* STEPBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000033 /* STEPBridgeTests.swift */; };
 		A1000034 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000034 /* XCTest.framework */; };
+		A1000036 /* LeadInConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000036 /* LeadInConfig.swift */; };
+		A1000037 /* LeadInConfigView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000037 /* LeadInConfigView.swift */; };
 		AA000001AA000001AA000001 /* ToolpathPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002AA000002AA000002 /* ToolpathPlanner.swift */; };
 		AA000003AA000003AA000003 /* KinematicsEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000004AA000004AA000004 /* KinematicsEngine.swift */; };
 		AA000005AA000005AA000005 /* VelocityProfiler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000006AA000006AA000006 /* VelocityProfiler.swift */; };
@@ -67,10 +68,11 @@
 		A2000020 /* STEPBridgeWrapper.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = STEPBridgeWrapper.m; sourceTree = "<group>"; };
 		A2000021 /* CutPresetManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CutPresetManager.swift; sourceTree = "<group>"; };
 		A2000022 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		A2000036 /* LeadInConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeadInConfig.swift; sourceTree = "<group>"; };
 		A2000032 /* GCodeGeneratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GCodeGeneratorTests.swift; sourceTree = "<group>"; };
 		A2000033 /* STEPBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = STEPBridgeTests.swift; sourceTree = "<group>"; };
 		A2000034 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
+		A2000036 /* LeadInConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeadInConfig.swift; sourceTree = "<group>"; };
+		A2000037 /* LeadInConfigView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeadInConfigView.swift; sourceTree = "<group>"; };
 		A3000001 /* pipe-macos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "pipe-macos.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000002 /* pipe-macosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "pipe-macosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA000002AA000002AA000002 /* ToolpathPlanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ToolpathPlanner.swift; sourceTree = "<group>"; };
@@ -143,6 +145,7 @@
 				A2000021 /* CutPresetManager.swift */,
 				A2000022 /* SettingsView.swift */,
 				A2000036 /* LeadInConfig.swift */,
+				A2000037 /* LeadInConfigView.swift */,
 				A2000003 /* Assets.xcassets */,
 				42D713402F6CB31900932D0D /* pipe-macos-Bridging-Header.h */,
 				42D713432F6CB36500932D0D /* verify_occt.sh */,
@@ -300,6 +303,7 @@
 				A1000020 /* CutPresetManager.swift in Sources */,
 				A1000021 /* SettingsView.swift in Sources */,
 				A1000036 /* LeadInConfig.swift in Sources */,
+				A1000037 /* LeadInConfigView.swift in Sources */,
 				505BE73B3277D1530180D6E0 /* GCodeGenerator.swift in Sources */,
 				AA000001AA000001AA000001 /* ToolpathPlanner.swift in Sources */,
 				AA000003AA000003AA000003 /* KinematicsEngine.swift in Sources */,

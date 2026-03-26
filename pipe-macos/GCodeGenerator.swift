@@ -108,15 +108,58 @@ struct GCodeSettings {
     // MARK: Lead-In Geometry
     // -------------------------------------------------------------------------
 
-    var leadInDistance: CGFloat = 5.0
-    var leadInAngle: CGFloat = 90.0
-    var leadInAngleDistance: CGFloat = 3.0
+    var leadInBySeverCut:  LeadInConfig = .defaultSeverCut
+    var leadInByHole:      LeadInConfig = .defaultHole
+    var leadInByCutout:    LeadInConfig = .defaultCutout
+    var leadInByNotch:     LeadInConfig = .defaultNotch
+
+    /// Holes smaller than this diameter (mm) auto-select the `centerPierce` strategy
+    /// so the pierce mark stays safely inside the scrap area.
+    var smallHoleDiameterThreshold: Double = 12.0
+
+    /// Per-feature lead-in overrides, keyed by `GeometricFeature.id`.
+    /// When present, these take precedence over the type-level defaults above.
+    var leadInOverrides: [Int: LeadInConfig] = [:]
+
+    /// Returns the lead-in config to use for a given feature, honouring per-feature
+    /// overrides and the small-hole auto-select rule.
+    func resolveLeadInConfig(for feature: GeometricFeature) -> LeadInConfig {
+        if let override = leadInOverrides[feature.id] { return override }
+        switch feature.type {
+        case .startCut, .endCut:
+            return leadInBySeverCut
+        case .hole:
+            let diameter = feature.dimensions["diameter"] ?? feature.dimensions["width"] ?? 0
+            return diameter < CGFloat(smallHoleDiameterThreshold) ? LeadInConfig(strategy: .centerPierce) : leadInByHole
+        case .cutout:
+            return leadInByCutout
+        case .notch:
+            return leadInByNotch
+        }
+    }
 
     // -------------------------------------------------------------------------
-    // MARK: Overburn
+    // MARK: Lead-Out (Overburn)
     // -------------------------------------------------------------------------
 
-    var overburnDegrees: CGFloat = 10.0
+    var leadOutBySeverCut: LeadOutConfig = .defaultSeverCut
+    var leadOutByHole:     LeadOutConfig = .defaultHole
+    var leadOutByCutout:   LeadOutConfig = .defaultCutout
+    var leadOutByNotch:    LeadOutConfig = .defaultNotch
+
+    /// Per-feature lead-out overrides, keyed by `GeometricFeature.id`.
+    var leadOutOverrides: [Int: LeadOutConfig] = [:]
+
+    /// Returns the lead-out config to use for a given feature, honouring per-feature overrides.
+    func resolveLeadOutConfig(for feature: GeometricFeature) -> LeadOutConfig {
+        if let override = leadOutOverrides[feature.id] { return override }
+        switch feature.type {
+        case .startCut, .endCut: return leadOutBySeverCut
+        case .hole:              return leadOutByHole
+        case .cutout:            return leadOutByCutout
+        case .notch:             return leadOutByNotch
+        }
+    }
 
     // -------------------------------------------------------------------------
     // MARK: Controller Mode
@@ -388,6 +431,20 @@ class GCodeGenerator {
         if d > 0.9999 { return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) }
         if d < -0.9999 { return simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 1, 0)) }
         return simd_quatf(angle: acos(d), axis: normalize(cross(a, target)))
+    }
+
+    // MARK: - Overlay Planning (for 3D visualisation)
+
+    /// Plans all features in `stock` without pack or roll offsets, returning
+    /// `PlannedFeature` values whose `plannedPath.leadInPoints` and
+    /// `plannedPath.cutPoints` can be projected back onto the tube surface
+    /// for 3D rendering.  No kinematics or G-code emission is performed.
+    func planFeaturesForOverlay(for stock: StockInfo) -> [PlannedFeature] {
+        let planner = ToolpathPlanner(settings: settings)
+        return stock.features.map { feature in
+            planner.plan(feature: feature, stock: stock,
+                         packStartX: 0, rollOffset: 0, previousMachineAm: 0)
+        }
     }
 
     // MARK: - TCP Toolpath (Orchestrator)
