@@ -284,9 +284,13 @@ enum ViewMode: String, CaseIterable, Identifiable {
 
 // MARK: - Simulation Segment
 struct SimSegment {
-    let startX: Float   // G-code X at segment start (pack space)
+    let startX: Float   // G-code X at segment start (pack space, mm)
+    let startY: Float   // G-code Y at segment start (mm)
+    let startZ: Float   // G-code Z at segment start (mm)
     let startA: Float   // G-code A (degrees) at segment start
     let endX: Float     // G-code X at segment end
+    let endY: Float     // G-code Y at segment end
+    let endZ: Float     // G-code Z at segment end
     let endA: Float     // G-code A (degrees) at segment end
     let torchOn: Bool   // whether torch fires during this segment
     let isCut: Bool     // true = G1 feed, false = G0 rapid
@@ -766,7 +770,7 @@ class AppViewModel: ObservableObject {
         packSceneBundle = PackSceneBundle(scene: scene, contentLength: totalLength,
                                           halfHeight: visibleHalfHeight, shapeNodes: shapeNodes)
         // Position the torch at the initial "parked" state (free end, retracted)
-        applySimState(gcodeX: simTotalLength, gcodeA: 0, torchOn: false)
+        applySimState(gcodeX: simTotalLength, gcodeY: 0, gcodeZ: 0, gcodeA: 0, torchOn: false)
     }
 
     // MARK: - Simulation
@@ -776,7 +780,7 @@ class AppViewModel: ObservableObject {
         simSegmentIdx = 0
         simSegmentElapsed = 0
         // Show torch at the free (right) end of stock — where cutting starts
-        applySimState(gcodeX: simTotalLength, gcodeA: 0, torchOn: false)
+        applySimState(gcodeX: simTotalLength, gcodeY: 0, gcodeZ: 0, gcodeA: 0, torchOn: false)
     }
 
     func toggleSim() {
@@ -810,8 +814,10 @@ class AppViewModel: ObservableObject {
             if simSegmentElapsed <= seg.realDuration {
                 let t = simSegmentElapsed / seg.realDuration
                 let x = seg.startX + t * (seg.endX - seg.startX)
+                let y = seg.startY + t * (seg.endY - seg.startY)
+                let z = seg.startZ + t * (seg.endZ - seg.startZ)
                 let a = seg.startA + t * (seg.endA - seg.startA)
-                applySimState(gcodeX: x, gcodeA: a, torchOn: seg.torchOn)
+                applySimState(gcodeX: x, gcodeY: y, gcodeZ: z, gcodeA: a, torchOn: seg.torchOn)
                 return
             }
             simSegmentElapsed -= seg.realDuration
@@ -819,12 +825,12 @@ class AppViewModel: ObservableObject {
         }
         // All segments done
         if let last = simSegments.last {
-            applySimState(gcodeX: last.endX, gcodeA: last.endA, torchOn: false)
+            applySimState(gcodeX: last.endX, gcodeY: last.endY, gcodeZ: last.endZ, gcodeA: last.endA, torchOn: false)
         }
         stopSim()
     }
 
-    private func applySimState(gcodeX: Float, gcodeA: Float, torchOn: Bool) {
+    private func applySimState(gcodeX: Float, gcodeY: Float, gcodeZ: Float, gcodeA: Float, torchOn: Bool) {
         guard let scene = packSceneBundle?.scene,
               let stockGroup = scene.rootNode.childNode(withName: "stockGroup", recursively: false) else { return }
 
@@ -835,18 +841,28 @@ class AppViewModel: ObservableObject {
         stockGroup.eulerAngles = SCNVector3(-gcodeA * Float.pi / 180.0 + simA0Offset, 0, 0)
 
         // Torch is fixed in scene space — stationary at X=simTotalLength, directly above the
-        // tube axis. Only Y changes to show retracted (safe height) vs descending to cut.
+        // tube axis. Y and Z change to show machine motion.
         if let torchNode = scene.rootNode.childNode(withName: "torch", recursively: false) {
-            let settings = GCodeSettings()
-            let standoff: Float = torchOn ? Float(settings.cutHeight) : Float(settings.safeHeight)
-            // Tip is at (simStockRadius + standoff) above tube axis; cone centre is half-height further
-            let centreY = simStockRadius + standoff + simTorchHeight / 2.0
-            torchNode.position = SCNVector3(CGFloat(simTotalLength), CGFloat(centreY), 0)
+            // gcodeZ is height relative to stock baseline.
+            // In SceneKit, baseline is at simStockRadius.
+            let tipY = simStockRadius + gcodeZ
+            let centreY = tipY + simTorchHeight / 2.0
+            
+            // gcodeY is transverse offset. Map to SceneKit Z.
+            torchNode.position = SCNVector3(CGFloat(simTotalLength), CGFloat(centreY), CGFloat(gcodeY))
+            
             // Cone always points straight down — eulerAngles stay at zero
             torchNode.eulerAngles = SCNVector3(0, 0, 0)
-            torchNode.geometry?.firstMaterial?.emission.contents = torchOn
-                ? NSColor(red: 1.0, green: 0.4, blue: 0.0, alpha: 1.0)
-                : NSColor.black
+            
+            if let mat = torchNode.geometry?.firstMaterial {
+                if torchOn {
+                    mat.diffuse.contents = NSColor.orange
+                    mat.emission.contents = NSColor.red
+                } else {
+                    mat.diffuse.contents = NSColor.lightGray
+                    mat.emission.contents = NSColor.black
+                }
+            }
         }
     }
 
@@ -857,24 +873,28 @@ class AppViewModel: ObservableObject {
         let effRadius: Float = max(simStockRadius, 20.0)  // for arc-distance timing estimate
 
         var segments: [SimSegment] = []
-        var curX: Float = 0, curA: Float = 0, curZ: Float = 0
+        var curX: Float = 0, curY: Float = 0, curZ: Float = 0, curA: Float = 0
         var curFeed: Float = 1000
         var torchOn = false
+        var mmScale: Float = 1.0  // multiply by 25.4 if G20 (inches) is active
 
         for rawLine in gcode.components(separatedBy: "\n") {
             let commentStripped = rawLine.components(separatedBy: ";")[0]
             let line = commentStripped.trimmingCharacters(in: .whitespaces).uppercased()
             guard !line.isEmpty else { continue }
 
+            if line.contains("G20") { mmScale = 25.4 }
+            if line.contains("G21") { mmScale = 1.0 }
             if line.hasPrefix("M3") { torchOn = true;  continue }
             if line.hasPrefix("M5") { torchOn = false; continue }
 
             // G92 resets the tracked coordinates without creating a segment
             if line.hasPrefix("G92") {
                 for tok in line.components(separatedBy: " ") {
-                    if tok.hasPrefix("X"), let v = Float(tok.dropFirst()) { curX = v }
-                    if tok.hasPrefix("A"), let v = Float(tok.dropFirst()) { curA = v }
-                    if tok.hasPrefix("Z"), let v = Float(tok.dropFirst()) { curZ = v }
+                    if tok.hasPrefix("X"), let v = Float(tok.dropFirst()) { curX = v * mmScale }
+                    if tok.hasPrefix("Y"), let v = Float(tok.dropFirst()) { curY = v * mmScale }
+                    if tok.hasPrefix("Z"), let v = Float(tok.dropFirst()) { curZ = v * mmScale }
+                    if tok.hasPrefix("A"), let v = Float(tok.dropFirst()) { curA = v } // A is always degrees
                 }
                 continue
             }
@@ -883,28 +903,30 @@ class AppViewModel: ObservableObject {
             let isG1 = line.hasPrefix("G1 ") || line.hasPrefix("G01 ")
             guard isG0 || isG1 else { continue }
 
-            var newX = curX, newA = curA, newZ = curZ
+            var newX = curX, newY = curY, newZ = curZ, newA = curA
             for tok in line.components(separatedBy: " ") {
-                if tok.hasPrefix("X"), let v = Float(tok.dropFirst()) { newX = v }
+                if tok.hasPrefix("X"), let v = Float(tok.dropFirst()) { newX = v * mmScale }
+                if tok.hasPrefix("Y"), let v = Float(tok.dropFirst()) { newY = v * mmScale }
+                if tok.hasPrefix("Z"), let v = Float(tok.dropFirst()) { newZ = v * mmScale }
                 if tok.hasPrefix("A"), let v = Float(tok.dropFirst()) { newA = v }
-                if tok.hasPrefix("Z"), let v = Float(tok.dropFirst()) { newZ = v }
-                if tok.hasPrefix("F"), let v = Float(tok.dropFirst()) { curFeed = v }
+                if tok.hasPrefix("F"), let v = Float(tok.dropFirst()) { curFeed = v * mmScale }
             }
 
             let effectiveFeed = isG0 ? rapidFeed : curFeed
             let dx = newX - curX
-            let da_mm = (newA - curA) * Float.pi / 180.0 * effRadius
+            let dy = newY - curY
             let dz = newZ - curZ
-            let dist = sqrt(dx * dx + da_mm * da_mm + dz * dz)
+            let da_mm = (newA - curA) * Float.pi / 180.0 * effRadius
+            let dist = sqrt(dx * dx + dy * dy + dz * dz + da_mm * da_mm)
             let realSec = max(dist / max(effectiveFeed / 60.0, 0.001), 0.0001)
 
             segments.append(SimSegment(
-                startX: curX, startA: curA,
-                endX: newX, endA: newA,
+                startX: curX, startY: curY, startZ: curZ, startA: curA,
+                endX: newX, endY: newY, endZ: newZ, endA: newA,
                 torchOn: torchOn, isCut: isG1,
                 realDuration: realSec
             ))
-            curX = newX; curA = newA; curZ = newZ
+            curX = newX; curY = newY; curZ = newZ; curA = newA
         }
         return segments
     }
