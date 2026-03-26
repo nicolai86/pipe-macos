@@ -337,9 +337,7 @@ class ModelLoader {
         let trueCrossMax = max(trueWidth, trueHeight)
         let trueCrossMin = min(trueWidth, trueHeight)
 
-        // A round tube has one cylinder spanning > π (180°) around its axis.
-        // Rectangular corner fillets each span only ~ π/2 (90°), so no single fillet
-        // ever crosses the half-circle threshold regardless of radius or mesh density.
+        // A cylinder spanning >180° indicates a round tube; fillets span ~90°
         let isRound = maxCylAngularSpan > .pi
         let isRectangular = !isRound && !sideWallCandidates.isEmpty
 
@@ -428,6 +426,15 @@ class ModelLoader {
         let touchesEnd   = loopMaxX >= tubeLength - axisTol
         if isFullProfile && touchesStart { return .startCut }
         if isFullProfile && touchesEnd   { return .endCut   }
+        // Complex end profiles: full 360° loop whose near edge is within complexEndTol
+        // of a tube end, and whose entire extent stays within the first/last quarter of
+        // the tube. Handles saddle-cut intersections where the shallowest point is a few
+        // mm from the tube end but still clearly outside the tight axisTol margin.
+        if isFullProfile {
+            let complexEndTol: Float = max(axisTol * 5.0, 10.0)
+            if loopMinX <= complexEndTol && loopMaxX < tubeLength * 0.25 { return .startCut }
+            if loopMaxX >= tubeLength - complexEndTol && loopMinX > tubeLength * 0.75 { return .endCut }
+        }
         if touchesStart || touchesEnd    { return .notch    }
         return .cutout
     }
@@ -443,10 +450,14 @@ class ModelLoader {
         // 0.5 mm (5× the 0.1 mm mesh deflection) gives ample numerical margin while staying
         // safely below any realistic wall thickness — ruling out inner faces on all standard
         // HSS grades (minimum EN 10219 / ASTM A500 wall thickness is 1.5 mm).
-        let extremumTol: Float = 0.5
+        // Identification of outer wall faces is based strictly on detected stock dimensions.
+        // This ensures that intersecting features (like other tubes) are not misidentified
+        // as part of the stock hull, even if they extend beyond the stock's dimensions.
         var outerWallFaceIDs = Set<Int>()
+        let isRectangular = stockInfo.profile == .square || stockInfo.profile == .rectangular
+        let stockR = Float((stockInfo.od ?? 0) / 2.0)
 
-        // Identify outer hull faces using each face's OWN normal direction as reference.
+        // Identify outer hull faces using StockInfo as the absolute geometric reference.
         for face in facesData {
             let faceID = getInt(face, "faceID")
             guard let vArr = face["vertices"] as? [[String: Any]], !vArr.isEmpty else { continue }
@@ -454,34 +465,46 @@ class ModelLoader {
             if let type = face["surface_type"] as? String {
                 if type == "PLANE", let pd = face["plane"] as? [String: Any] {
                     let n = normalize(SIMD3<Float>(getFloat(pd, "normalX"), getFloat(pd, "normalY"), getFloat(pd, "normalZ")))
+                    // Plane must be parallel to the tube axis (normal perpendicular to axis)
                     guard length(n) > 0.5, abs(dot(n, tubeAxis)) < 0.15 else { continue }
 
-                    let fv = vArr[0]
-                    let d = dot(SIMD3<Float>(getFloat(fv, "x"), getFloat(fv, "y"), getFloat(fv, "z")), n)
-
-                    var maxD: Float = -.greatestFiniteMagnitude
-                    for rv in renderVerts {
-                        maxD = max(maxD, dot(SIMD3<Float>(Float(rv.x), Float(rv.y), Float(rv.z)), n))
-                    }
-
-                    if d >= maxD - extremumTol {
-                        outerWallFaceIDs.insert(faceID)
+                    if isRectangular {
+                        // Outer PLANE faces lie at the mesh extremum in their normal direction.
+                        // Use mesh-global maxD so this works regardless of StockInfo accuracy.
+                        let fv = vArr[0]
+                        let d = dot(SIMD3<Float>(getFloat(fv, "x"), getFloat(fv, "y"), getFloat(fv, "z")), n)
+                        var maxD: Float = -.greatestFiniteMagnitude
+                        for rv in renderVerts { maxD = max(maxD, dot(SIMD3<Float>(Float(rv.x), Float(rv.y), Float(rv.z)), n)) }
+                        let extremumTol: Float = 0.5
+                        if d >= maxD - extremumTol { outerWallFaceIDs.insert(faceID) }
                     }
                 } else if type == "CYLINDER", let cyl = face["cylinder"] as? [String: Any] {
                     let cAxis = normalize(SIMD3<Float>(getFloat(cyl, "axisX"), getFloat(cyl, "axisY"), getFloat(cyl, "axisZ")))
-                    let axisAlign = abs(dot(cAxis, tubeAxis))
-                    guard axisAlign > 0.9 else { continue }
-                    let cLoc = SIMD3<Float>(getFloat(cyl, "locationX"), getFloat(cyl, "locationY"), getFloat(cyl, "locationZ"))
+                    // Cylinder axis must be parallel to the tube axis
+                    guard abs(dot(cAxis, tubeAxis)) > 0.95 else { continue }
+                    
                     let radius = getFloat(cyl, "radius")
-                    let u  = abs(dot(cLoc - center, uAxis))
-                    let vv = abs(dot(cLoc - center, vAxis))
-                    
-                    let halfU = (maxPosU - minNegU) / 2.0
-                    let halfV = (maxPosV - minNegV) / 2.0
-                    let cylTol: Float = 0.5
-                    
-                    if u + radius >= halfU - cylTol || vv + radius >= halfV - cylTol {
-                        outerWallFaceIDs.insert(faceID)
+                    let cLoc = SIMD3<Float>(getFloat(cyl, "locationX"), getFloat(cyl, "locationY"), getFloat(cyl, "locationZ"))
+                    // Radial distance of the cylinder's axis from the tube's axis
+                    let distFromAxis = length((cLoc - center) - tubeAxis * dot(cLoc - center, tubeAxis))
+
+                    if stockInfo.profile == .round {
+                        // For round stock, the outer wall is the main cylinder itself (distFromAxis ~ 0)
+                        if abs(radius - stockR) < 2.0 && distFromAxis < 2.0 {
+                            outerWallFaceIDs.insert(faceID)
+                        }
+                    } else if isRectangular {
+                        // For rectangular stock, include corner fillet cylinders whose arc
+                        // reaches the hull boundary. Use mesh extrema so this works even
+                        // when corner radius is not explicitly known (e.g., not in StockInfo).
+                        let u = abs(dot(cLoc - center, uAxis))
+                        let vv = abs(dot(cLoc - center, vAxis))
+                        let halfU = (maxPosU - minNegU) / 2.0
+                        let halfV = (maxPosV - minNegV) / 2.0
+                        let cylTol: Float = 0.5
+                        if u + radius >= halfU - cylTol || vv + radius >= halfV - cylTol {
+                            outerWallFaceIDs.insert(faceID)
+                        }
                     }
                 }
             }
@@ -614,6 +637,9 @@ class ModelLoader {
                 unwrappedPath.append(ToolpathPoint(x: pathPoints2D[i].x, a: currentA))
             }
 
+            // For sever cuts (startCut/endCut), sort by A so the toolpath is A-monotonic,
+            // then close by appending a point at firstPt.a + 360° to complete the rotation.
+            // Other feature types (holes, notches, cutouts) keep their topological ordering.
             if type == .startCut || type == .endCut {
                 unwrappedPath.sort { $0.a < $1.a }
                 if let firstPt = unwrappedPath.first {
