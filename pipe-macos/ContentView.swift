@@ -611,6 +611,10 @@ class AppViewModel: ObservableObject {
                 self.featureLeadOutOverrides = [:]
                 self.toolpathOverlayGeneration += 1
                 self.loadedModel = model
+                // Auto-select the first shape so the overlay is visible immediately
+                if let first = model.selectableShapes.first {
+                    self.selectShape(first)
+                }
             }
         } else {
             print("Failed to load model")

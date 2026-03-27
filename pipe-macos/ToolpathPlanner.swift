@@ -131,7 +131,8 @@ struct ToolpathPlanner {
         let (leadInPoints, cutPath) = buildLeadIn(
             path: finalPath, k: k,
             config: leadInConfig,
-            isScrapLeft: isScrapLeft
+            isScrapLeft: isScrapLeft,
+            featureType: feature.type
         )
 
         // 8. Lead-out geometry (overburn)
@@ -185,13 +186,42 @@ struct ToolpathPlanner {
         path: [ToolpathPoint],
         featureType: SurfaceFeatureType
     ) -> [ToolpathPoint] {
+        // Distinguish straight sever cuts (all X ≈ equal) from saddle/cope cuts (X varies with A).
+        // For straight cuts, pick the point on a flat face (nearest 90° multiple) so the torch
+        // pierces a flat surface — same behaviour as before.
+        // For saddle cuts, the "nearest 90°" heuristic often picks the shallowest point of the
+        // saddle (minimal scrap), causing the lead-in to extend off the tube end into air.
+        // Instead, pick the point with the most scrap material behind it so the lead-in is
+        // always within the stock bounds:
+        //   startCut: scrap is at X < cut(A) → pick the A where cut(A) is maximum (deepest)
+        //   endCut:   scrap is at X > cut(A) → pick the A where cut(A) is minimum (deepest)
+        let xValues = path.map { $0.x }
+        let xRange = (xValues.max() ?? 0) - (xValues.min() ?? 0)
+
         var bestIdx = 0
-        var minDiff = CGFloat.greatestFiniteMagnitude
-        for (i, pt) in path.enumerated() {
-            let modA = abs(pt.a.truncatingRemainder(dividingBy: 90.0))
-            let diff = min(modA, 90.0 - modA)
-            if diff < minDiff { minDiff = diff; bestIdx = i }
+        if xRange < 5.0 {
+            // Straight sever: find the point nearest to any 90° face
+            var minDiff = CGFloat.greatestFiniteMagnitude
+            for (i, pt) in path.enumerated() {
+                let modA = abs(pt.a.truncatingRemainder(dividingBy: 90.0))
+                let diff = min(modA, 90.0 - modA)
+                if diff < minDiff { minDiff = diff; bestIdx = i }
+            }
+        } else {
+            // Saddle/cope sever: pick deepest-scrap pierce point
+            if featureType == .startCut {
+                var maxX = -CGFloat.greatestFiniteMagnitude
+                for (i, pt) in path.enumerated() {
+                    if pt.x > maxX { maxX = pt.x; bestIdx = i }
+                }
+            } else {
+                var minX = CGFloat.greatestFiniteMagnitude
+                for (i, pt) in path.enumerated() {
+                    if pt.x < minX { minX = pt.x; bestIdx = i }
+                }
+            }
         }
+
         guard bestIdx > 0 else { return path }
         var corePath = path
         if abs(corePath.last!.a - (corePath.first!.a + 360.0)) < 1.0 {
@@ -298,15 +328,16 @@ struct ToolpathPlanner {
         path: [ToolpathPoint],
         k: CGFloat,
         config: LeadInConfig,
-        isScrapLeft: Bool
+        isScrapLeft: Bool,
+        featureType: SurfaceFeatureType
     ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
         switch config.strategy {
         case .rotationalArc:
             return buildRotationalArcLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
         case .tangentArc:
-            return buildTangentArcLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+            return buildTangentArcLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft, featureType: featureType)
         case .linear:
-            return buildLinearLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+            return buildLinearLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft, featureType: featureType)
         case .centerPierce:
             return buildCenterPierceLeadIn(path: path, config: config)
         case .spiral:
@@ -339,24 +370,37 @@ struct ToolpathPlanner {
 
     /// Circular arc tangent to the cut path at the pierce point.
     /// Prepended with a straight approach segment of `approachLength` mm.
+    /// For sever cuts the entry tangent is always axial (from the scrap side) so the approach
+    /// is independent of the potentially-unreliable rawPath tangent.
     private func buildTangentArcLeadIn(
         path: [ToolpathPoint],
         k: CGFloat,
         config: LeadInConfig,
-        isScrapLeft: Bool
+        isScrapLeft: Bool,
+        featureType: SurfaceFeatureType
     ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
         let p0 = path[0]
         let p1 = path.count > 1 ? path[1] : ToolpathPoint(x: p0.x + 1, a: p0.a)
-        let dx = p1.x - p0.x
-        let da_mm = (p1.a - p0.a) * k
-        let gamma = atan2(da_mm, dx)
+
+        // For sever cuts, use a fixed axial approach tangent (gamma = 0 for startCut,
+        // gamma = π for endCut) so the arc entry is always from the scrap side.
+        let gamma: CGFloat
+        if featureType == .startCut {
+            gamma = 0.0          // approaching in +X direction (from scrap left of pierce)
+        } else if featureType == .endCut {
+            gamma = CGFloat.pi   // approaching in -X direction (from scrap right of pierce)
+        } else {
+            let dx = p1.x - p0.x
+            let da_mm = (p1.a - p0.a) * k
+            gamma = atan2(da_mm, dx)
+        }
         let leadR    = CGFloat(config.arcRadius)
         let leadTheta = CGFloat(config.arcAngleDeg) * .pi / 180.0
         let leadL    = CGFloat(config.approachLength)
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
 
         guard leadTheta > 0.01 && leadR > 0.01 else {
-            return buildLinearLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft)
+            return buildLinearLeadIn(path: path, k: k, config: config, isScrapLeft: isScrapLeft, featureType: featureType)
         }
 
         let Cx = p0.x + leadR * cos(gamma + sideMultiplier * .pi / 2.0)
@@ -380,19 +424,39 @@ struct ToolpathPlanner {
         return ([straightPt] + arcPts, path)
     }
 
-    /// Straight angled line approaching the cut path from outside.
+    /// Straight approach line to the cut-path pierce point.
+    ///
+    /// For sever cuts (startCut/endCut) the approach is always computed on the CLEAN STOCK
+    /// SURFACE — a pure axial (X-direction) traverse from the scrap side.  This makes the
+    /// lead-in independent of the rawPath tangent, which can be unreliable for complex
+    /// saddle/cope profiles where the feature detection may produce garbled point ordering.
+    ///
+    /// For internal features (holes, notches, cutouts) the approach uses the path tangent
+    /// at the pierce point, rotated by `linearAngleDeg`.
     private func buildLinearLeadIn(
         path: [ToolpathPoint],
         k: CGFloat,
         config: LeadInConfig,
-        isScrapLeft: Bool
+        isScrapLeft: Bool,
+        featureType: SurfaceFeatureType
     ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
         let p0 = path[0]
+        let leadL = CGFloat(config.linearLength)
+
+        // Sever cuts: approach along the perfect stock surface, axially from the scrap side.
+        // startCut → scrap is at X < pierce → approach from X - leadL
+        // endCut   → scrap is at X > pierce → approach from X + leadL
+        if featureType == .startCut || featureType == .endCut {
+            let xDir: CGFloat = featureType == .startCut ? -1.0 : 1.0
+            let pt = ToolpathPoint(x: p0.x + xDir * leadL, a: p0.a)
+            return ([pt], path)
+        }
+
+        // Internal features: tangent-based approach with optional angular deflection.
         let p1 = path.count > 1 ? path[1] : ToolpathPoint(x: p0.x + 1, a: p0.a)
         let dx = p1.x - p0.x
         let da_mm = (p1.a - p0.a) * k
         let gamma = atan2(da_mm, dx)
-        let leadL = CGFloat(config.linearLength)
         let angleDelta = CGFloat(config.linearAngleDeg) * .pi / 180.0
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
         let approachAngle = gamma - sideMultiplier * angleDelta

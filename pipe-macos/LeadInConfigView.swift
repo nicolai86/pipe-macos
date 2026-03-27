@@ -149,6 +149,11 @@ struct FeatureRowView: View {
                 ? Color.accentColor.opacity(0.14)
                 : Color(NSColor.controlBackgroundColor))
             .contentShape(Rectangle())
+            .onHover { hovering in
+                if hovering && !isSelected {
+                    viewModel.selectFeature(feature.id)
+                }
+            }
             .onTapGesture {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     viewModel.selectFeature(isSelected ? nil : feature.id)

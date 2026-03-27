@@ -230,12 +230,22 @@ struct SceneKitView: NSViewRepresentable {
         if stock.profile == .round {
             r = Float((stock.od ?? 50.0) / 2.0)
         } else {
-            // Rectangular: intersect the direction vector with the rectangular hull
-            let hw = Float((stock.odX ?? 50.0) / 2.0)
-            let hh = Float((stock.odY ?? 50.0) / 2.0)
+            // Rectangular: intersect the direction vector with the rectangular hull.
+            // uAxisDimension is the face-to-face distance in the cosA (uAxis) direction;
+            // the remaining dimension is in the sinA (vAxis) direction.
             let cosA = cos(aRad), sinA = sin(aRad)
-            let tu = abs(cosA) > 1e-4 ? hw / abs(cosA) : Float.greatestFiniteMagnitude
-            let tv = abs(sinA) > 1e-4 ? hh / abs(sinA) : Float.greatestFiniteMagnitude
+            let hu: Float  // half-extent in uAxis direction (cosA)
+            let hv: Float  // half-extent in vAxis direction (sinA)
+            if let uDim = stock.uAxisDimension {
+                hu = Float(uDim / 2.0)
+                let totalFlat = Float((stock.odX ?? 50.0) + (stock.odY ?? 50.0))
+                hv = (totalFlat - Float(uDim)) / 2.0
+            } else {
+                hu = Float((stock.odX ?? 50.0) / 2.0)
+                hv = Float((stock.odY ?? 50.0) / 2.0)
+            }
+            let tu = abs(cosA) > 1e-4 ? hu / abs(cosA) : Float.greatestFiniteMagnitude
+            let tv = abs(sinA) > 1e-4 ? hv / abs(sinA) : Float.greatestFiniteMagnitude
             r = min(tu, tv)
         }
 

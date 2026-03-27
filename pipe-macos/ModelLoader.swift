@@ -511,16 +511,77 @@ class ModelLoader {
         }
 
         // =================================================================================
-        // SOTA: HIERARCHICAL WIRE EXTRACTION
-        // We now extract and maintain the exact OpenCASCADE wire topology.
-        // BRepTools_WireExplorer guarantees edges are sequential. We append them safely
-        // without distance-guessing, which prevents jumping kerf gaps.
-        // WHY: Naive point-clustering often fails when multiple cut lines are close 
-        // (e.g. kerf width gaps). By following the topological wires, we ensure that
-        // feature boundaries are extracted exactly as defined in the CAD model.
+        // HYBRID WIRE EXTRACTION: TWO-PASS APPROACH
+        //
+        // The complete feature boundary for any cut consists of two kinds of edges:
+        //
+        //   Type A (outer-surface edges): shared between an outer wall face and a
+        //   non-outer face.  These appear in outer wall face wires. Captured by Pass 1.
+        //
+        //   Type B (interior-closure edges): shared between a non-outer feature face
+        //   (e.g. an intersecting pipe cylinder) and an end-cap plane.  These appear only
+        //   in end-cap or feature-face wires — never in outer wall wires.  Needed when
+        //   a saddle/cope cut profile closes through the tube interior rather than across
+        //   the outer surface.  Captured by Pass 2.
+        //
+        // Simple sever cuts have only Type A edges → Pass 2 adds nothing.
+        // Saddle/cope cuts that don't reach the opposite outer face have both types →
+        // Pass 2 adds the interior closure so the profile loop can be stitched closed.
+        // Holes, notches, cutouts that fully penetrate the wall have only Type A → unchanged.
         // =================================================================================
+
+        // Classify non-outer faces into end caps vs feature faces.
+        //
+        // End caps: axial-normal PLANE faces (normal nearly parallel to tubeAxis).
+        //
+        // Feature faces: non-outer, non-end-cap faces that DIRECTLY TOUCH an outer wall face
+        // (i.e., share at least one edge with a face in outerWallFaceIDs).
+        //
+        // WHY the adjacency check: hollow HSS stock has inner wall faces (inner flat panels +
+        // inner corner fillet cylinders) that are neither outer walls nor end caps. Without
+        // this check they fall into featureFaceIDs and cause pass 2 to spuriously collect the
+        // inner-ring boundary of the annular end cap as a "feature" loop — producing garbled
+        // rawPath geometry. Inner walls are separated from outer walls by the tube wall
+        // thickness (≥ 1.5 mm for any standard HSS grade) and therefore never share an edge
+        // with an outer wall face. Actual feature faces (the cutting pipe cylinder, notch
+        // surfaces, hole cylinders) DO share edges with outer wall faces.
+        var endCapFaceIDs = Set<Int>()
+        var featureFaceIDs = Set<Int>()
+        for face in facesData {
+            let fid = getInt(face, "faceID")
+            guard !outerWallFaceIDs.contains(fid) else { continue }
+            var isEndCap = false
+            if let type = face["surface_type"] as? String, type == "PLANE",
+               let pd = face["plane"] as? [String: Any] {
+                let raw = SIMD3<Float>(getFloat(pd, "normalX"), getFloat(pd, "normalY"), getFloat(pd, "normalZ"))
+                if length(raw) > 0.5 && abs(dot(normalize(raw), tubeAxis)) > 0.85 {
+                    isEndCap = true
+                }
+            }
+            if isEndCap {
+                endCapFaceIDs.insert(fid)
+            } else {
+                // Only treat as a feature face if it touches an outer wall face.
+                guard let wires = face["wires"] as? [[String: Any]] else { continue }
+                var touchesOuterWall = false
+                outerSearch: for wire in wires {
+                    guard let edges = wire["edges"] as? [[String: Any]] else { continue }
+                    for edge in edges {
+                        let adjFaces = getIntArray(edge["adjacentFaceIDs"])
+                        if adjFaces.contains(where: { outerWallFaceIDs.contains($0) }) {
+                            touchesOuterWall = true; break outerSearch
+                        }
+                    }
+                }
+                if touchesOuterWall { featureFaceIDs.insert(fid) }
+            }
+        }
+
         var partialLoops: [[SIMD3<Float>]] = []
 
+        // ── Pass 1: outer wall face wires ─────────────────────────────────────────
+        // Collect Type A edges: edges that are shared between an outer wall face and
+        // any non-outer face (end cap, feature face, or inner wall).
         for face in facesData {
             let faceID = getInt(face, "faceID")
             guard outerWallFaceIDs.contains(faceID),
@@ -528,36 +589,28 @@ class ModelLoader {
 
             for wire in wires {
                 guard let edges = wire["edges"] as? [[String: Any]] else { continue }
-                
+
                 var currentWireLoop: [SIMD3<Float>] = []
-                
-                // Iterate through the edges sequentially as provided by BRepTools_WireExplorer
+
                 for edge in edges {
                     let adjFaces = getIntArray(edge["adjacentFaceIDs"])
                     guard let pointsData = edge["points"] as? [[String: Any]], !pointsData.isEmpty else { continue }
-                    
-                    // Manifold feature boundary edge check
+
                     let touchesInnerFace = adjFaces.count >= 2 &&
                         adjFaces.contains { !outerWallFaceIDs.contains($0) }
-                    
+
                     if touchesInnerFace {
-                        var pts: [SIMD3<Float>] = []
-                        for p in pointsData { pts.append(SIMD3<Float>(getFloat(p, "x"), getFloat(p, "y"), getFloat(p, "z"))) }
-                        
+                        let pts = pointsData.map { SIMD3<Float>(getFloat($0, "x"), getFloat($0, "y"), getFloat($0, "z")) }
+
                         if currentWireLoop.isEmpty {
                             currentWireLoop.append(contentsOf: pts)
                         } else {
                             let lastPt = currentWireLoop.last!
-                            let firstPt = pts.first!
-                            let endPt = pts.last!
-                            
-                            // 1e-3 tolerance for exact topological connection within the same B-Rep wire
-                            if distance(lastPt, firstPt) < 1e-3 {
+                            if distance(lastPt, pts.first!) < 1e-3 {
                                 currentWireLoop.append(contentsOf: pts.dropFirst())
-                            } else if distance(lastPt, endPt) < 1e-3 {
+                            } else if distance(lastPt, pts.last!) < 1e-3 {
                                 currentWireLoop.append(contentsOf: pts.reversed().dropFirst())
                             } else {
-                                // Gap in the feature boundary (e.g., skipped a non-boundary edge)
                                 partialLoops.append(currentWireLoop)
                                 currentWireLoop = pts
                             }
@@ -566,6 +619,53 @@ class ModelLoader {
                 }
                 if !currentWireLoop.isEmpty {
                     partialLoops.append(currentWireLoop)
+                }
+            }
+        }
+
+        // ── Pass 2: end cap face wires ────────────────────────────────────────────
+        // Collect Type B edges: edges shared between an end-cap face and a feature face.
+        // These form the "interior closure" of a cope/saddle profile where the cut surface
+        // meets the remaining end-cap material below the reach of the cutting pipe.
+        // Only run when feature faces are present (harmless for simple sever cuts).
+        if !featureFaceIDs.isEmpty {
+            for face in facesData {
+                let faceID = getInt(face, "faceID")
+                guard endCapFaceIDs.contains(faceID),
+                      let wires = face["wires"] as? [[String: Any]] else { continue }
+
+                for wire in wires {
+                    guard let edges = wire["edges"] as? [[String: Any]] else { continue }
+
+                    var currentWireLoop: [SIMD3<Float>] = []
+
+                    for edge in edges {
+                        let adjFaces = getIntArray(edge["adjacentFaceIDs"])
+                        guard let pointsData = edge["points"] as? [[String: Any]], !pointsData.isEmpty else { continue }
+
+                        // Only collect edges shared with a feature face (not outer wall, not end cap).
+                        let touchesFeature = adjFaces.contains { featureFaceIDs.contains($0) }
+                        guard touchesFeature else { continue }
+
+                        let pts = pointsData.map { SIMD3<Float>(getFloat($0, "x"), getFloat($0, "y"), getFloat($0, "z")) }
+
+                        if currentWireLoop.isEmpty {
+                            currentWireLoop.append(contentsOf: pts)
+                        } else {
+                            let lastPt = currentWireLoop.last!
+                            if distance(lastPt, pts.first!) < 1e-3 {
+                                currentWireLoop.append(contentsOf: pts.dropFirst())
+                            } else if distance(lastPt, pts.last!) < 1e-3 {
+                                currentWireLoop.append(contentsOf: pts.reversed().dropFirst())
+                            } else {
+                                partialLoops.append(currentWireLoop)
+                                currentWireLoop = pts
+                            }
+                        }
+                    }
+                    if !currentWireLoop.isEmpty {
+                        partialLoops.append(currentWireLoop)
+                    }
                 }
             }
         }
