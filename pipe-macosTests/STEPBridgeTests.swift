@@ -105,15 +105,22 @@ final class STEPBridgeTests: XCTestCase {
         XCTAssertEqual(cutBlocks.count, 2, "Expected exactly 2 cutting blocks")
         
         for (blockIdx, block) in cutBlocks.enumerated() {
-            guard let firstMove = block.first else { continue }
-            let blockX = firstMove.x ?? 0.0
-            
-            // "no movement on X during cutting (between M3...M5)"
+            guard !block.isEmpty else { continue }
+
+            // The rotational-arc lead-in ramps X from the scrap zone to the cut plane over
+            // ≤5 G1 moves; after that, X must hold constant for the entire sever perimeter.
+            // Use the last X in the block as the reference (the rotational-arc lead-out also
+            // keeps X constant, so last == cut plane).
+            let cutX = block.compactMap { $0.x }.last ?? 0.0
+            var pastRamp = false
             for (moveIdx, move) in block.enumerated() {
-                if let x = move.x {
-                    XCTAssertEqual(x, blockX, accuracy: 0.001, "X moved in cutting block \(blockIdx) at move \(moveIdx)")
+                guard let x = move.x else { continue }
+                if !pastRamp {
+                    if abs(x - cutX) <= 0.01 { pastRamp = true } else { continue }
                 }
+                XCTAssertEqual(x, cutX, accuracy: 0.01, "X drifted in cut phase of block \(blockIdx) at move \(moveIdx)")
             }
+            XCTAssertTrue(pastRamp, "No stable-X cut phase found in block \(blockIdx)")
             
             // Pattern check: Torch moves on Y (flat), then AYZ (corner), then Y (flat)...
             // We expect 4 flat faces and 4 corners.
@@ -493,8 +500,10 @@ final class STEPBridgeTests: XCTestCase {
             let ySpan = (yValues.max() ?? 0) - (yValues.min() ?? 0)
             let zSpan = (zValues.max() ?? 0) - (zValues.min() ?? 0)
             
-            if xSpan < 0.01 {
-                // Straight cut: No movement on X, Y, or Z. Only A.
+            if xSpan < 5.0 {
+                // Straight cut: X is effectively constant (only A rotates).
+                // The rotational-arc lead-in ramps X by at most scrapClearanceXMm (≤3 mm),
+                // so xSpan can be up to ~3 mm while still being a straight sever cut.
                 XCTAssertLessThan(ySpan, 0.01, "Y moved in straight cut block \(idx)")
                 XCTAssertLessThan(zSpan, 0.01, "Z moved in straight cut block \(idx)")
                 XCTAssertGreaterThan(aValues.count, 0, "No A moves in straight cut block \(idx)")
@@ -680,28 +689,37 @@ final class STEPBridgeTests: XCTestCase {
         }
         
         var blockCentroidsX: [Double] = []
-        
+
         for (idx, block) in cutBlocks.enumerated() {
             guard let firstMove = block.first else { continue }
-            let firstX = firstMove.x ?? 0
             let firstY = firstMove.y ?? 0
             let firstZ = firstMove.z ?? 0
-            blockCentroidsX.append(firstX)
-            
-            XCTAssertFalse(firstX.isNaN, "X in block \(idx) is NaN")
+
+            // The rotational-arc lead-in ramps X from the scrap zone to the cut plane over
+            // ≤5 G1 moves. Use the last X in the block as the cut-plane reference; the
+            // rotational-arc lead-out also keeps X constant, so last == cut plane.
+            let cutX = block.compactMap { $0.x }.last ?? 0.0
+            XCTAssertFalse(cutX.isNaN, "X in block \(idx) is NaN")
             XCTAssertFalse(firstY.isNaN, "Y in block \(idx) is NaN")
             XCTAssertFalse(firstZ.isNaN, "Z in block \(idx) is NaN")
-            
-            // "both ends are cut with ONLY rotation on the A axis. X does not move during cutting (between M3...M5), Y does not move, Z does not move"
+            blockCentroidsX.append(cutX)
+
+            // After the lead-in ramp, X must stay constant (only A rotates).
+            // For round stock Y and Z are always 0 (normal always points to tube axis),
+            // so those are checked for every move.
+            var pastRamp = false
             for (moveIdx, move) in block.enumerated() {
-                if let x = move.x {
-                    XCTAssertEqual(x, firstX, accuracy: 0.001, "X moved in block \(idx) at move \(moveIdx) (expected constant X=\(firstX), got \(x))")
-                }
                 if let y = move.y {
-                    XCTAssertEqual(y, firstY, accuracy: 0.001, "Y moved in block \(idx) at move \(moveIdx) (expected constant Y=\(firstY), got \(y))")
+                    XCTAssertEqual(y, firstY, accuracy: 0.001, "Y moved in block \(idx) at move \(moveIdx)")
                 }
                 if let z = move.z {
-                    XCTAssertEqual(z, firstZ, accuracy: 0.001, "Z moved in block \(idx) at move \(moveIdx) (expected constant Z=\(firstZ), got \(z))")
+                    XCTAssertEqual(z, firstZ, accuracy: 0.001, "Z moved in block \(idx) at move \(moveIdx)")
+                }
+                if let x = move.x {
+                    if !pastRamp {
+                        if abs(x - cutX) <= 0.01 { pastRamp = true } else { continue }
+                    }
+                    XCTAssertEqual(x, cutX, accuracy: 0.01, "X drifted during sever cut in block \(idx) at move \(moveIdx)")
                 }
             }
             

@@ -33,6 +33,7 @@
 		AA000005AA000005AA000005 /* VelocityProfiler.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000006AA000006AA000006 /* VelocityProfiler.swift */; };
 		AA000007AA000007AA000007 /* GCodeEmitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000008AA000008AA000008 /* GCodeEmitter.swift */; };
 		AC000010 /* ToolpathPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC000011 /* ToolpathPipelineTests.swift */; };
+		AD000001 /* KinematicMathTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD000002 /* KinematicMathTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -80,6 +81,7 @@
 		AA000006AA000006AA000006 /* VelocityProfiler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VelocityProfiler.swift; sourceTree = "<group>"; };
 		AA000008AA000008AA000008 /* GCodeEmitter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GCodeEmitter.swift; sourceTree = "<group>"; };
 		AC000011 /* ToolpathPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolpathPipelineTests.swift; sourceTree = "<group>"; };
+		AD000002 /* KinematicMathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KinematicMathTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -190,6 +192,7 @@
 				A2000032 /* GCodeGeneratorTests.swift */,
 				A2000033 /* STEPBridgeTests.swift */,
 				AC000011 /* ToolpathPipelineTests.swift */,
+				AD000002 /* KinematicMathTests.swift */,
 			);
 			path = "pipe-macosTests";
 			sourceTree = "<group>";
@@ -319,6 +322,7 @@
 				A1000032 /* GCodeGeneratorTests.swift in Sources */,
 				A1000033 /* STEPBridgeTests.swift in Sources */,
 				AC000010 /* ToolpathPipelineTests.swift in Sources */,
+				AD000001 /* KinematicMathTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

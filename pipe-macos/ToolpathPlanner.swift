@@ -645,7 +645,7 @@ struct ToolpathPlanner {
     /// Giving the kerf-offset algorithm a geodesic working plane means each millimetre
     /// of s is exactly 1 mm of surface distance, so a 2D perpendicular offset in (X, s)
     /// space equals a true geodesic kerf offset on the tube surface.
-    private struct HSSGeodesicProfile {
+    struct HSSGeodesicProfile {
         private struct Sample {
             let a: CGFloat
             let s: CGFloat
@@ -756,7 +756,7 @@ struct ToolpathPlanner {
 
     // MARK: - Offline 2D Polyline Kerf Offset
 
-    private func applyOfflineKerfOffset(
+    func applyOfflineKerfOffset(
         to path: [ToolpathPoint],
         radius: CGFloat,
         isClosed: Bool,
