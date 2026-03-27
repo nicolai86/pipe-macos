@@ -173,74 +173,89 @@ struct SettingsView: View {
     private var advancedTab: some View {
         ScrollView {
             Form {
-                Section {
-                    advancedField("Rapid Rate", unit: "mm/min", value: $manager.advancedSettings.rapidRate)
-                    advancedField("Safe Height", unit: "mm", value: $manager.advancedSettings.safeHeight)
-                } header: {
-                    AdvancedSectionHeader(title: "Motion", info: "Controls how fast the machine moves between features and how high the torch retracts during repositioning. Rapid Rate should match the maximum safe traverse speed configured in your controller — going higher risks missed steps on stepper-driven axes. Safe Height must clear the tallest point of the tube (including any corner overhang on rectangular stock) during A-axis rotation rapids; increase it if you hear the torch clipping the tube on repositioning moves.")
-                }
-
-                Section {
-                    advancedField("Hole overburn", unit: "mm",
-                                  value: $manager.advancedSettings.leadOutByHole.extensionMm)
-                    advancedField("Cutout overburn", unit: "mm",
-                                  value: $manager.advancedSettings.leadOutByCutout.extensionMm)
-                    advancedField("Notch overburn", unit: "mm",
-                                  value: $manager.advancedSettings.leadOutByNotch.extensionMm)
-                    advancedField("Sever sweep", unit: "mm",
-                                  value: $manager.advancedSettings.leadOutBySeverCut.rotationalSweepMm)
-                } header: {
-                    AdvancedSectionHeader(
-                        title: "Lead-Out (Overburn)",
-                        info: "These are the type-level defaults for how far the torch extends past the cut closure or sever line. Larger values give a cleaner kerf closure at the cost of slightly more heat near the start point. Per-feature overrides are set in the feature list after G-code generation.")
-                }
-
-                Section {
-                    Toggle("Enable Thermal Hedging", isOn: $manager.advancedSettings.enableThermalHedging)
-                        .onChange(of: manager.advancedSettings.enableThermalHedging) { _ in manager.saveAdvanced() }
-                    advancedField("X Weight", unit: "×", value: $manager.advancedSettings.thermalHedgingWeightX)
-                        .disabled(!manager.advancedSettings.enableThermalHedging)
-                        .foregroundColor(manager.advancedSettings.enableThermalHedging ? .primary : .secondary)
-                    advancedField("A Weight", unit: "×", value: $manager.advancedSettings.thermalHedgingWeightA)
-                        .disabled(!manager.advancedSettings.enableThermalHedging)
-                        .foregroundColor(manager.advancedSettings.enableThermalHedging ? .primary : .secondary)
-                } header: {
-                    AdvancedSectionHeader(title: "Thermal Hedging", info: "Reorders the cutting sequence to spread heat evenly across the tube before severing. Internal features (holes, notches) are cut first in a nearest-neighbour order; sever cuts follow right-to-left so already-cut sections fall away cleanly. The X and A weights control how the sequencer balances axial travel against tube rotation when choosing the next feature — raise X Weight to prefer features that are close axially, raise A Weight to prefer features that require less tube rotation to reach. Leave both at 1.0 for equal weighting.")
-                }
-
-                Section {
-                    Toggle("Enable Kerf Compensation", isOn: $manager.advancedSettings.enableKerfComp)
-                        .onChange(of: manager.advancedSettings.enableKerfComp) { _ in manager.saveAdvanced() }
-                    Toggle("Use SimCNC Feedrate Mode", isOn: $manager.advancedSettings.useSimCNC)
-                        .onChange(of: manager.advancedSettings.useSimCNC) { _ in manager.saveAdvanced() }
-                    Toggle("Enable Dynamic THC (corner lock)", isOn: $manager.advancedSettings.enableDynamicTHC)
-                        .onChange(of: manager.advancedSettings.enableDynamicTHC) { _ in manager.saveAdvanced() }
-                    Toggle("Enable Dynamic Safe Z (asymmetric envelope)", isOn: $manager.advancedSettings.enableDynamicSafeZ)
-                        .onChange(of: manager.advancedSettings.enableDynamicSafeZ) { _ in manager.saveAdvanced() }
-                } header: {
-                    AdvancedSectionHeader(title: "Compensation", info: "Kerf Compensation offsets the cut path inward or outward by half the kerf width so the finished part matches the intended geometry — leave this on unless your controller applies its own G41/G42 offset. SimCNC Feedrate Mode generates feed rates that account for all four axes simultaneously, preserving the intended cut speed; turn it off for standard Fanuc/Mach4/LinuxCNC controllers that interpret F as the XYZ linear rate only. Dynamic THC injects corner-lock codes (M220/M221) at HSS corner transitions to stop the torch-height controller from chasing rapid arc-voltage changes through the corner — disable only if your THC does not support M220/M221. Dynamic Safe Z raises the retract height automatically for rectangular stock whose corner radius exceeds the flat-face half-height; disable if you prefer a fixed retract height.")
-                }
-
-                Section {
-                    advancedField("X Axis", unit: "mm/s²", value: $manager.advancedSettings.maxAccelX)
-                    advancedField("Y Axis", unit: "mm/s²", value: $manager.advancedSettings.maxAccelY)
-                    advancedField("Z Axis", unit: "mm/s²", value: $manager.advancedSettings.maxAccelZ)
-                    advancedField("A Axis", unit: "°/s²",  value: $manager.advancedSettings.maxAccelA)
-                } header: {
-                    AdvancedSectionHeader(title: "Axis Acceleration Limits", info: "Must match the acceleration values configured in your machine controller (Mach4 motor tuning, LinuxCNC INI MAX_ACCELERATION). These are used by the velocity profiler to compute safe junction speeds and feed-rate ramps — they do not change the controller's actual limits. Setting these higher than the controller allows will produce feed-rate commands the machine cannot execute, causing missed steps or stalls. Setting them lower than the controller's actual capability leaves cut-speed potential unused. The A axis typically has the lowest practical limit due to chuck inertia; verify at low feed rate before raising it.")
-                }
-
-                Section {
-                    advancedField("X Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkX)
-                    advancedField("Y Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkY)
-                    advancedField("Z Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkZ)
-                    advancedField("A Axis", unit: "°/s³",  value: $manager.advancedSettings.maxJerkA)
-                } header: {
-                    AdvancedSectionHeader(title: "Axis Jerk Limits (S-Curve)", info: "Defines the rate of change of acceleration. These limits enable S-curve velocity profiling to reduce mechanical resonance and vibration. X and A values are automatically scaled down for thicker/heavier material presets to account for increased inertia (referenced to a 1/4\" 20ft stick). Y and Z carry only the torch and use fixed limits.")
-                }
+                advancedMotionSections
+                advancedCompensationSections
+                advancedAxisLimitSections
             }
             .formStyle(.grouped)
             .padding(.horizontal)
+        }
+    }
+
+    @ViewBuilder
+    private var advancedMotionSections: some View {
+        Section {
+            advancedField("Rapid Rate", unit: "mm/min", value: $manager.advancedSettings.rapidRate)
+            advancedField("Safe Height", unit: "mm", value: $manager.advancedSettings.safeHeight)
+        } header: {
+            AdvancedSectionHeader(title: "Motion", info: "Controls how fast the machine moves between features and how high the torch retracts during repositioning. Rapid Rate should match the maximum safe traverse speed configured in your controller — going higher risks missed steps on stepper-driven axes. Safe Height must clear the tallest point of the tube (including any corner overhang on rectangular stock) during A-axis rotation rapids; increase it if you hear the torch clipping the tube on repositioning moves.")
+        }
+
+        Section {
+            advancedField("Hole overburn", unit: "mm",
+                          value: $manager.advancedSettings.leadOutByHole.extensionMm)
+            advancedField("Cutout overburn", unit: "mm",
+                          value: $manager.advancedSettings.leadOutByCutout.extensionMm)
+            advancedField("Notch overburn", unit: "mm",
+                          value: $manager.advancedSettings.leadOutByNotch.extensionMm)
+            advancedField("Sever sweep", unit: "mm",
+                          value: $manager.advancedSettings.leadOutBySeverCut.rotationalSweepMm)
+        } header: {
+            AdvancedSectionHeader(
+                title: "Lead-Out (Overburn)",
+                info: "These are the type-level defaults for how far the torch extends past the cut closure or sever line. Larger values give a cleaner kerf closure at the cost of slightly more heat near the start point. Per-feature overrides are set in the feature list after G-code generation.")
+        }
+
+        Section {
+            Toggle("Enable Thermal Hedging", isOn: $manager.advancedSettings.enableThermalHedging)
+                .onChange(of: manager.advancedSettings.enableThermalHedging) { _ in manager.saveAdvanced() }
+            advancedField("X Weight", unit: "×", value: $manager.advancedSettings.thermalHedgingWeightX)
+                .disabled(!manager.advancedSettings.enableThermalHedging)
+                .foregroundColor(manager.advancedSettings.enableThermalHedging ? .primary : .secondary)
+            advancedField("A Weight", unit: "×", value: $manager.advancedSettings.thermalHedgingWeightA)
+                .disabled(!manager.advancedSettings.enableThermalHedging)
+                .foregroundColor(manager.advancedSettings.enableThermalHedging ? .primary : .secondary)
+        } header: {
+            AdvancedSectionHeader(title: "Thermal Hedging", info: "Reorders the cutting sequence to spread heat evenly across the tube before severing. Internal features (holes, notches) are cut first in a nearest-neighbour order; sever cuts follow right-to-left so already-cut sections fall away cleanly. The X and A weights control how the sequencer balances axial travel against tube rotation when choosing the next feature — raise X Weight to prefer features that are close axially, raise A Weight to prefer features that require less tube rotation to reach. Leave both at 1.0 for equal weighting.")
+        }
+    }
+
+    @ViewBuilder
+    private var advancedCompensationSections: some View {
+        Section {
+            Toggle("Enable Kerf Compensation", isOn: $manager.advancedSettings.enableKerfComp)
+                .onChange(of: manager.advancedSettings.enableKerfComp) { _ in manager.saveAdvanced() }
+            Toggle("Use SimCNC Feedrate Mode", isOn: $manager.advancedSettings.useSimCNC)
+                .onChange(of: manager.advancedSettings.useSimCNC) { _ in manager.saveAdvanced() }
+            Toggle("Enable Dynamic THC (corner lock)", isOn: $manager.advancedSettings.enableDynamicTHC)
+                .onChange(of: manager.advancedSettings.enableDynamicTHC) { _ in manager.saveAdvanced() }
+            Toggle("Enable Dynamic Safe Z (asymmetric envelope)", isOn: $manager.advancedSettings.enableDynamicSafeZ)
+                .onChange(of: manager.advancedSettings.enableDynamicSafeZ) { _ in manager.saveAdvanced() }
+            Toggle("Emit G02/G03 arc commands for lead-in arcs", isOn: $manager.advancedSettings.enableArcOutput)
+                .onChange(of: manager.advancedSettings.enableArcOutput) { _ in manager.saveAdvanced() }
+        } header: {
+            AdvancedSectionHeader(title: "Compensation", info: "Kerf Compensation offsets the cut path inward or outward by half the kerf width so the finished part matches the intended geometry — leave this on unless your controller applies its own G41/G42 offset. SimCNC Feedrate Mode generates feed rates that account for all four axes simultaneously, preserving the intended cut speed; turn it off for standard Fanuc/Mach4/LinuxCNC controllers that interpret F as the XYZ linear rate only. Dynamic THC injects corner-lock codes (M220/M221) at HSS corner transitions to stop the torch-height controller from chasing rapid arc-voltage changes through the corner — disable only if your THC does not support M220/M221. Dynamic Safe Z raises the retract height automatically for rectangular stock whose corner radius exceeds the flat-face half-height; disable if you prefer a fixed retract height. G02/G03 Arc Commands replaces tangent arc lead-in polylines with a single G17 G02/G03 command on rectangular HSS stock — enable only after verifying your controller interprets I/J centre offsets correctly; has no effect on round stock.")
+        }
+    }
+
+    @ViewBuilder
+    private var advancedAxisLimitSections: some View {
+        Section {
+            advancedField("X Axis", unit: "mm/s²", value: $manager.advancedSettings.maxAccelX)
+            advancedField("Y Axis", unit: "mm/s²", value: $manager.advancedSettings.maxAccelY)
+            advancedField("Z Axis", unit: "mm/s²", value: $manager.advancedSettings.maxAccelZ)
+            advancedField("A Axis", unit: "°/s²",  value: $manager.advancedSettings.maxAccelA)
+        } header: {
+            AdvancedSectionHeader(title: "Axis Acceleration Limits", info: "Must match the acceleration values configured in your machine controller (Mach4 motor tuning, LinuxCNC INI MAX_ACCELERATION). These are used by the velocity profiler to compute safe junction speeds and feed-rate ramps — they do not change the controller's actual limits. Setting these higher than the controller allows will produce feed-rate commands the machine cannot execute, causing missed steps or stalls. Setting them lower than the controller's actual capability leaves cut-speed potential unused. The A axis typically has the lowest practical limit due to chuck inertia; verify at low feed rate before raising it.")
+        }
+
+        Section {
+            advancedField("X Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkX)
+            advancedField("Y Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkY)
+            advancedField("Z Axis", unit: "mm/s³", value: $manager.advancedSettings.maxJerkZ)
+            advancedField("A Axis", unit: "°/s³",  value: $manager.advancedSettings.maxJerkA)
+        } header: {
+            AdvancedSectionHeader(title: "Axis Jerk Limits (S-Curve)", info: "Defines the rate of change of acceleration. These limits enable S-curve velocity profiling to reduce mechanical resonance and vibration. X and A values are automatically scaled down for thicker/heavier material presets to account for increased inertia (referenced to a 1/4\" 20ft stick). Y and Z carry only the torch and use fixed limits.")
         }
     }
 

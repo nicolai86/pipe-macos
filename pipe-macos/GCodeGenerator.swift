@@ -162,6 +162,16 @@ struct GCodeSettings {
     }
 
     // -------------------------------------------------------------------------
+    // MARK: Arc Output
+    // -------------------------------------------------------------------------
+
+    /// When `true`, the emitter replaces qualifying G01 polyline spans with a
+    /// single G02/G03 arc command.  Only tangent-arc lead-ins on flat HSS faces
+    /// are eligible (round stock always has Ym = 0, making XY arcs degenerate).
+    /// Off by default until validated on physical hardware.
+    var enableArcOutput: Bool = false
+
+    // -------------------------------------------------------------------------
     // MARK: Controller Mode
     // -------------------------------------------------------------------------
 
@@ -204,6 +214,34 @@ struct GCodeSettings {
     var thermalHedgingWeightA: CGFloat = 1.0
 }
 
+// MARK: - Arc Emission Types
+
+/// G-code interpolation plane selector used for G02/G03 arc commands.
+enum ArcPlane: String {
+    case xy = "G17"  // standard XY plane
+    case yz = "G19"  // YZ plane (circumferential arcs)
+}
+
+/// Identifies a contiguous span of machine points that form a circular arc,
+/// allowing the emitter to collapse a G01 polyline into a single G02/G03.
+///
+/// Indices reference the `machinePoints` array inside `ToolpathFeature`.
+/// The arc covers `machinePoints[startMachineIndex...endMachineIndex]`.
+struct ArcHint {
+    /// First arc machine-point index (inclusive).
+    let startMachineIndex: Int
+    /// Last arc machine-point index (inclusive).
+    let endMachineIndex: Int
+    /// I: X distance from the arc-start point to the circle centre (mm).
+    let iOffset: CGFloat
+    /// J: Y distance from the arc-start point to the circle centre (mm).
+    let jOffset: CGFloat
+    /// K: Z distance from the arc-start point to the circle centre (mm, G19 only).
+    let kOffset: CGFloat
+    let isCCW: Bool
+    let plane: ArcPlane
+}
+
 // MARK: - Machine TCP Data Structure
 
 struct MachinePoint {
@@ -236,6 +274,9 @@ struct ToolpathFeature {
     let source: PlannedFeature
     let machinePoints: [MachinePoint]
     let segments: [TrajectorySegment]
+    /// Arc spans eligible for G02/G03 emission.  Empty when `enableArcOutput`
+    /// is `false` or no qualifying arc geometry was found.
+    var arcHints: [ArcHint] = []
 }
 
 // MARK: - GCode Generator
@@ -469,7 +510,10 @@ class GCodeGenerator {
             initialMachineAm: isPackMode ? currentA : nil
         )
         let segments = VelocityProfiler(settings: settings).profile(machinePoints: machines)
-        let toolpathFeature = ToolpathFeature(source: planned, machinePoints: machines, segments: segments)
+        let arcHints = KinematicsEngine(settings: settings).resolveArcHints(
+            plannedFeature: planned, machinePoints: machines)
+        var toolpathFeature = ToolpathFeature(source: planned, machinePoints: machines, segments: segments)
+        toolpathFeature.arcHints = arcHints
         let gcode = GCodeEmitter(settings: settings).emitFeature(
             toolpathFeature: toolpathFeature,
             stock: stock,

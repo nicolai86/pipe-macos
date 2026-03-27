@@ -54,6 +54,7 @@ struct AdvancedSettings: Codable {
     var maxJerkY: Double = 5000.0 // Hardcoded torch-only Y/Z
     var maxJerkZ: Double = 2000.0
     var maxJerkA: Double = 5000.0
+    var enableArcOutput: Bool = false
 }
 
 // MARK: - Preset Manager
@@ -119,7 +120,8 @@ class CutPresetManager: ObservableObject {
         s.maxJerkY            = CGFloat(advancedSettings.maxJerkY) // Y/Z carry torch only
         s.maxJerkZ            = CGFloat(advancedSettings.maxJerkZ)
         s.maxJerkA            = CGFloat(advancedSettings.maxJerkA) * thicknessScale
-        
+        s.enableArcOutput     = advancedSettings.enableArcOutput
+
         return s
     }
 

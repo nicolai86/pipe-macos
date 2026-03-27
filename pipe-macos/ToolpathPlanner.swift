@@ -1,5 +1,27 @@
 import Foundation
 
+// MARK: - Surface Arc
+
+/// Arc geometry captured from a `.tangentArc` lead-in, expressed in 2-D
+/// surface space (X, s = A·k).
+///
+/// Handed to `KinematicsEngine.resolveArcHints` so it can validate the arc in
+/// machine space and, if it checks out, emit a single G02/G03 command instead
+/// of a G01 polyline.
+struct SurfaceArc {
+    /// Arc centre X coordinate in surface (X, s) space (mm).
+    let centerX: CGFloat
+    /// Arc centre s coordinate in surface (X, s) space (mm, s = A·k).
+    let centerS: CGFloat
+    /// Arc radius in surface (X, s) space (mm).
+    let radius: CGFloat
+    let isCCW: Bool
+    /// Number of arc sample points inside `PlannedPath.leadInPoints`.
+    /// Index 0 in `leadInPoints` is the straight approach; the arc occupies
+    /// indices `1 … arcPointCount` (inclusive).
+    let arcPointCount: Int
+}
+
 // MARK: - Planned Path
 
 /// The result of 2D toolpath planning for a single feature.
@@ -18,6 +40,9 @@ struct PlannedPath {
     /// Whether this feature is an internal cut (hole/cutout/notch).
     /// Forwarded to the emitter for the THC/direction comment only.
     let isInternal: Bool
+    /// Non-nil when the lead-in was produced by the `.tangentArc` strategy and
+    /// the arc geometry was successfully computed.
+    var leadInArc: SurfaceArc? = nil
 
     /// Combined path for the emitter and kinematics engine: lead-in → cut → lead-out.
     var points: [ToolpathPoint] { leadInPoints + cutPoints + leadOutPoints }
@@ -151,7 +176,7 @@ struct ToolpathPlanner {
 
         // 7. Lead-in geometry
         let leadInConfig = settings.resolveLeadInConfig(for: feature)
-        let (leadInPoints, cutPath) = buildLeadIn(
+        let (leadInPoints, cutPath, leadInArc) = buildLeadIn(
             path: finalPath,
             k: k,
             config: leadInConfig,
@@ -174,7 +199,8 @@ struct ToolpathPlanner {
                 leadInPoints: leadInPoints,
                 cutPoints: cutPath,
                 leadOutPoints: leadOutPoints,
-                isInternal: isInternal
+                isInternal: isInternal,
+                leadInArc: leadInArc
             )
         )
     }
@@ -381,47 +407,40 @@ struct ToolpathPlanner {
 
     /// Builds approach geometry for a feature and returns it split from the cut path.
     ///
-    /// - Returns: `(leadIn, cutPath)` where `leadIn` is the torch approach sequence
-    ///   and `cutPath` is the (possibly reordered) cut path.  For `.none` strategy,
-    ///   `leadIn` is empty and `cutPath` == `path`.
+    /// - Returns: `(leadIn, cutPath, arc)` where `leadIn` is the torch approach
+    ///   sequence, `cutPath` is the (possibly reordered) cut path, and `arc` is
+    ///   non-nil only for the `.tangentArc` strategy (used to emit G02/G03).
+    ///   For `.none` strategy `leadIn` is empty and `cutPath` == `path`.
     private func buildLeadIn(
         path: [ToolpathPoint],
         k: CGFloat,
         config: LeadInConfig,
         isScrapLeft: Bool,
         featureType: SurfaceFeatureType
-    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint], arc: SurfaceArc?) {
         switch config.strategy {
         case .rotationalArc:
-            return buildRotationalArcLeadIn(
-                path: path,
-                k: k,
-                config: config,
-                isScrapLeft: isScrapLeft,
-                featureType: featureType
-            )
+            let (l, c) = buildRotationalArcLeadIn(
+                path: path, k: k, config: config,
+                isScrapLeft: isScrapLeft, featureType: featureType)
+            return (l, c, nil)
         case .tangentArc:
             return buildTangentArcLeadIn(
-                path: path,
-                k: k,
-                config: config,
-                isScrapLeft: isScrapLeft,
-                featureType: featureType
-            )
+                path: path, k: k, config: config,
+                isScrapLeft: isScrapLeft, featureType: featureType)
         case .linear:
-            return buildLinearLeadIn(
-                path: path,
-                k: k,
-                config: config,
-                isScrapLeft: isScrapLeft,
-                featureType: featureType
-            )
+            let (l, c) = buildLinearLeadIn(
+                path: path, k: k, config: config,
+                isScrapLeft: isScrapLeft, featureType: featureType)
+            return (l, c, nil)
         case .centerPierce:
-            return buildCenterPierceLeadIn(path: path, config: config)
+            let (l, c) = buildCenterPierceLeadIn(path: path, config: config)
+            return (l, c, nil)
         case .spiral:
-            return buildSpiralLeadIn(path: path, k: k, config: config)
+            let (l, c) = buildSpiralLeadIn(path: path, k: k, config: config)
+            return (l, c, nil)
         case .none:
-            return ([], path)
+            return ([], path, nil)
         }
     }
 
@@ -481,7 +500,7 @@ struct ToolpathPlanner {
         config: LeadInConfig,
         isScrapLeft: Bool,
         featureType: SurfaceFeatureType
-    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
+    ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint], arc: SurfaceArc?) {
         let p0 = path[0]
         let p1 = path.count > 1 ? path[1] : ToolpathPoint(x: p0.x + 1, a: p0.a)
 
@@ -503,13 +522,10 @@ struct ToolpathPlanner {
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
 
         guard leadTheta > 0.01 && leadR > 0.01 else {
-            return buildLinearLeadIn(
-                path: path,
-                k: k,
-                config: config,
-                isScrapLeft: isScrapLeft,
-                featureType: featureType
-            )
+            let (l, c) = buildLinearLeadIn(
+                path: path, k: k, config: config,
+                isScrapLeft: isScrapLeft, featureType: featureType)
+            return (l, c, nil)
         }
 
         let Cx = p0.x + leadR * cos(gamma + sideMultiplier * .pi / 2.0)
@@ -535,7 +551,17 @@ struct ToolpathPlanner {
             x: firstArcPt.x - leadL * cos(entryTangent),
             a: ((firstArcPt.a * k) - leadL * sin(entryTangent)) / k
         )
-        return ([straightPt] + arcPts, path)
+
+        // Capture arc geometry for G02/G03 emission.
+        // Cy is already in s-space (A·k); isCCW = positive sideMultiplier
+        // = torch sweeps in the +angle direction = CCW in (X, s) plane.
+        let surfaceArc = SurfaceArc(
+            centerX: Cx, centerS: Cy,
+            radius: leadR,
+            isCCW: sideMultiplier > 0,
+            arcPointCount: arcSteps
+        )
+        return ([straightPt] + arcPts, path, surfaceArc)
     }
 
     /// Straight approach line to the cut-path pierce point.

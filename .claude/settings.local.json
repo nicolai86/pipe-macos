@@ -39,7 +39,8 @@
       "Bash(grep -v \"^$\\\\|^    \\\\|^Command\\\\|^Build settings\\\\|^2026\\\\|^Information\\\\|Ignoring\")",
       "Bash(grep -n \"leadIn\\\\|LeadIn\" /Users/nicolai86/Workspace/python/pipe-macos/pipe-macosTests/*.swift /Users/nicolai86/Workspace/python/pipe-macos/pipe-macos/*.swift)",
       "Bash(grep -n \"parseSTEPToJSON\\\\|isInner\\\\|wireID\\\\|toJSON\" /Users/nicolai86/Workspace/python/pipe-macos/pipe-macos/*.swift)",
-      "Bash(grep -E \"\\\\.\\(swift|h\\)$\")"
+      "Bash(grep -E \"\\\\.\\(swift|h\\)$\")",
+      "Bash(grep:*)"
     ]
   }
 }

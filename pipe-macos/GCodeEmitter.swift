@@ -52,18 +52,55 @@ struct GCodeEmitter {
             }
         }
 
-        for i in 1..<machinePoints.count {
+        // Build a lookup from arc-start index → ArcHint so the loop can
+        // collapse qualifying polyline spans into a single G02/G03.
+        var arcByStart: [Int: ArcHint] = [:]
+        for hint in toolpathFeature.arcHints {
+            arcByStart[hint.startMachineIndex] = hint
+        }
+
+        var i = 1
+        while i < machinePoints.count {
             let curr = machinePoints[i]
-            let seg = segments[i - 1]
+            let seg  = segments[i - 1]
+
             if settings.enableDynamicTHC {
                 if curr.isCorner && currentTHCState {
                     lines.append("#50 = #4061")
                     lines.append("#4061 = 100; currentTHCState = false")
+                    currentTHCState = false
                 } else if !curr.isCorner && !currentTHCState {
                     lines.append("#4061 = #50; currentTHCState = true")
+                    currentTHCState = true
                 }
             }
+
+            if let hint = arcByStart[i] {
+                            let endMP = machinePoints[hint.endMachineIndex]
+                            let arcFeed = hint.startMachineIndex < segments.count
+                                ? segments[hint.startMachineIndex].finalF
+                                : settings.feedRate
+                            let gWord = hint.isCCW ? "G3" : "G2"
+                            
+                            // BUG FIX: Calculate absolute radius to replace I/J offsets.
+                            // This eliminates the strict geometry fault in SimCNC caused by G-Code formatting truncation.
+                            // Works universally for XY arcs (k=0) and YZ arcs (i=0).
+                            let radius = sqrt(hint.iOffset * hint.iOffset + hint.jOffset * hint.jOffset + hint.kOffset * hint.kOffset)
+                            
+                            lines.append("\(hint.plane.rawValue)                ; select arc plane")
+                            lines.append(
+                                "\(gWord) X\(fmtU(endMP.Xm)) Y\(fmtU(endMP.Ym))"
+                                + " Z\(fmtU(endMP.Zm + settings.cutHeight))"
+                                + " R\(fmtU(radius))"
+                                + " A\(fmt(endMP.Am)) F\(fmtF(arcFeed))"
+                            )
+                            lines.append("G17                ; restore XY plane")
+                            i = hint.endMachineIndex + 1
+                            continue
+                        }
+
             lines.append("G1 X\(fmtU(curr.Xm)) Y\(fmtU(curr.Ym)) Z\(fmtU(curr.Zm + settings.cutHeight)) A\(fmt(curr.Am)) F\(fmtF(seg.finalF, segment: seg))")
+            i += 1
         }
         lines.append("M5; G0 Z\(fmtU(dynamicSafeZ))")
 

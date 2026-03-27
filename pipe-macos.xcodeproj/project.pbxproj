@@ -34,6 +34,7 @@
 		AA000007AA000007AA000007 /* GCodeEmitter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000008AA000008AA000008 /* GCodeEmitter.swift */; };
 		AC000010 /* ToolpathPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC000011 /* ToolpathPipelineTests.swift */; };
 		AD000001 /* KinematicMathTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD000002 /* KinematicMathTests.swift */; };
+		AE000001 /* ArcOutputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE000002 /* ArcOutputTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +83,7 @@
 		AA000008AA000008AA000008 /* GCodeEmitter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GCodeEmitter.swift; sourceTree = "<group>"; };
 		AC000011 /* ToolpathPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolpathPipelineTests.swift; sourceTree = "<group>"; };
 		AD000002 /* KinematicMathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KinematicMathTests.swift; sourceTree = "<group>"; };
+		AE000002 /* ArcOutputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArcOutputTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -193,6 +195,7 @@
 				A2000033 /* STEPBridgeTests.swift */,
 				AC000011 /* ToolpathPipelineTests.swift */,
 				AD000002 /* KinematicMathTests.swift */,
+				AE000002 /* ArcOutputTests.swift */,
 			);
 			path = "pipe-macosTests";
 			sourceTree = "<group>";
@@ -323,6 +326,7 @@
 				A1000033 /* STEPBridgeTests.swift in Sources */,
 				AC000010 /* ToolpathPipelineTests.swift in Sources */,
 				AD000001 /* KinematicMathTests.swift in Sources */,
+				AE000001 /* ArcOutputTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

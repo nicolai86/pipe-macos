@@ -33,10 +33,195 @@ struct KinematicsEngine {
             initialMachineAm: initialMachineAm
         )
         let dampedPoints = applyADLS(rawPoints: rawPoints, stock: stock)
+
+        var skipRanges: [ClosedRange<Int>] = []
+        if settings.enableArcOutput {
+            if let arc = plannedFeature.plannedPath.leadInArc {
+                skipRanges.append(1...arc.arcPointCount)
+            }
+
+            // FEATURE: Detect HSS fillet corners and protect them from nonlinear subdivision
+            // so they remain contiguous for G19 arc resolution.
+            var i = 0
+            while i < dampedPoints.count {
+                if dampedPoints[i].isCorner {
+                    var j = i
+                    while j < dampedPoints.count && dampedPoints[j].isCorner {
+                        j += 1
+                    }
+                    skipRanges.append(i...min(dampedPoints.count - 1, j))
+                    i = j
+                } else {
+                    i += 1
+                }
+            }
+        }
+
         return applyNonlinearCompensation(
             dampedPoints: dampedPoints,
-            stock: stock
+            stock: stock,
+            skipRanges: skipRanges
         )
+    }
+
+    // MARK: - Arc Hint Resolution
+
+    /// Validates the lead-in arc in machine (Xm, Ym) space and, if all polyline
+    /// points lie on a circle within tolerance, returns an `ArcHint` that the
+    /// emitter can use to collapse the span into a single G02/G03 command.
+    ///
+    /// Only runs when `settings.enableArcOutput` is `true`.
+    /// Returns an empty array for round stock (Ym = 0 always → XY arc degenerate).
+    func resolveArcHints(
+        plannedFeature: PlannedFeature,
+        machinePoints: [MachinePoint]
+    ) -> [ArcHint] {
+        var hints: [ArcHint] = []
+
+        // 1. Lead-In Arcs (XY Plane)
+        if settings.enableArcOutput,
+            let arc = plannedFeature.plannedPath.leadInArc,
+            arc.arcPointCount >= 2,
+            machinePoints.count > arc.arcPointCount + 1
+        {
+
+            let startIdx = 1
+            let endIdx = arc.arcPointCount
+
+            var valid = true
+            for i in startIdx...endIdx {
+                if machinePoints[i].isCorner {
+                    valid = false
+                    break
+                }
+            }
+
+            if valid {
+                let midIdx = startIdx + (endIdx - startIdx) / 2
+                let p1 = (
+                    machinePoints[startIdx].Xm, machinePoints[startIdx].Ym
+                )
+                let p2 = (machinePoints[midIdx].Xm, machinePoints[midIdx].Ym)
+                let p3 = (machinePoints[endIdx].Xm, machinePoints[endIdx].Ym)
+
+                if let (cx, cy, refR) = circumcircle2D(p1, p2, p3), refR > 0.5 {
+                    let tol = max(settings.nonlinearErrorTolerance * 2.0, 0.05)
+                    var arcValid = true
+                    for i in startIdx...endIdx {
+                        let mp = machinePoints[i]
+                        let dist = sqrt(pow(mp.Xm - cx, 2) + pow(mp.Ym - cy, 2))
+                        if abs(dist - refR) > tol {
+                            arcValid = false
+                            break
+                        }
+                    }
+
+                    if arcValid {
+                        let cross =
+                            (p2.0 - p1.0) * (p3.1 - p2.1) - (p2.1 - p1.1)
+                            * (p3.0 - p2.0)
+                        hints.append(
+                            ArcHint(
+                                startMachineIndex: startIdx,
+                                endMachineIndex: endIdx,
+                                iOffset: cx - p1.0,
+                                jOffset: cy - p1.1,
+                                kOffset: 0,
+                                isCCW: cross > 0,
+                                plane: .xy
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2. HSS Fillet Arcs (YZ Plane)
+        if settings.enableArcOutput {
+            var i = 0
+            while i < machinePoints.count {
+                if machinePoints[i].isCorner {
+                    let startIdx = max(0, i - 1)
+                    var j = i
+                    while j < machinePoints.count && machinePoints[j].isCorner {
+                        j += 1
+                    }
+                    let endIdx = min(machinePoints.count - 1, j)
+
+                    if endIdx > startIdx + 1 {
+                        let p1 = (
+                            machinePoints[startIdx].Ym,
+                            machinePoints[startIdx].Zm
+                        )
+                        let midIdx = startIdx + (endIdx - startIdx) / 2
+                        let p2 = (
+                            machinePoints[midIdx].Ym, machinePoints[midIdx].Zm
+                        )
+                        let p3 = (
+                            machinePoints[endIdx].Ym, machinePoints[endIdx].Zm
+                        )
+
+                        if let (cy, cz, refR) = circumcircle2D(p1, p2, p3),
+                            refR > 0.1
+                        {
+                            let tol = max(
+                                settings.nonlinearErrorTolerance * 2.0,
+                                0.05
+                            )
+                            var arcValid = true
+                            for k in startIdx...endIdx {
+                                let mp = machinePoints[k]
+                                let dist = sqrt(
+                                    pow(mp.Ym - cy, 2) + pow(mp.Zm - cz, 2)
+                                )
+                                if abs(dist - refR) > tol {
+                                    arcValid = false
+                                    break
+                                }
+                            }
+
+                            if arcValid {
+                                // In the YZ plane (G19) looking from +X towards -X, Y is horizontal, Z is vertical.
+                                let cross =
+                                    (p2.0 - p1.0) * (p3.1 - p2.1)
+                                    - (p2.1 - p1.1) * (p3.0 - p2.0)
+                                hints.append(
+                                    ArcHint(
+                                        startMachineIndex: startIdx,
+                                        endMachineIndex: endIdx,
+                                        iOffset: 0,
+                                        jOffset: cy - p1.0,
+                                        kOffset: cz - p1.1,
+                                        isCCW: cross > 0,
+                                        plane: .yz
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    i = j
+                } else {
+                    i += 1
+                }
+            }
+        }
+
+        return hints
+    }
+
+    private func circumcircle2D(
+        _ a: (CGFloat, CGFloat),
+        _ b: (CGFloat, CGFloat),
+        _ c: (CGFloat, CGFloat)
+    ) -> (cx: CGFloat, cy: CGFloat, r: CGFloat)? {
+        let D = 2 * (a.0 * (b.1 - c.1) + b.0 * (c.1 - a.1) + c.0 * (a.1 - b.1))
+        guard abs(D) > 1e-10 else { return nil }
+        let a2 = a.0 * a.0 + a.1 * a.1
+        let b2 = b.0 * b.0 + b.1 * b.1
+        let c2 = c.0 * c.0 + c.1 * c.1
+        let ux = (a2 * (b.1 - c.1) + b2 * (c.1 - a.1) + c2 * (a.1 - b.1)) / D
+        let uy = (a2 * (c.0 - b.0) + b2 * (a.0 - c.0) + c2 * (b.0 - a.0)) / D
+        return (ux, uy, sqrt((a.0 - ux) * (a.0 - ux) + (a.1 - uy) * (a.1 - uy)))
     }
 
     // MARK: - TCP Conversion
@@ -267,13 +452,19 @@ struct KinematicsEngine {
     /// beyond the configured tolerance, inserting extra waypoints where needed.
     private func applyNonlinearCompensation(
         dampedPoints: [MachinePoint],
-        stock: StockInfo
+        stock: StockInfo,
+        skipRanges: [ClosedRange<Int>] = []
     ) -> [MachinePoint] {
         guard !dampedPoints.isEmpty else { return [] }
         var result: [MachinePoint] = []
         result.reserveCapacity(dampedPoints.count)
         result.append(dampedPoints[0])
         for i in 1..<dampedPoints.count {
+            // Skip subdivision for protected arc spans
+            if skipRanges.contains(where: { $0.contains(i) }) {
+                result.append(dampedPoints[i])
+                continue
+            }
             appendWithCompensation(
                 into: &result,
                 sMp: result.last!,
