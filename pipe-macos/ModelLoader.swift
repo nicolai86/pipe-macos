@@ -559,7 +559,22 @@ class ModelLoader {
                 }
             }
             if isEndCap {
-                endCapFaceIDs.insert(fid)
+                // Require end cap to touch the outer wall, excluding internal notch-bottom
+                // planes that have axial normals but are bounded only by notch side walls.
+                // True sever end caps and complex end caps always share at least one edge
+                // with the outer wall face at the tube perimeter.
+                guard let capWires = face["wires"] as? [[String: Any]] else { continue }
+                var capTouchesOuter = false
+                capSearch: for wire in capWires {
+                    guard let edges = wire["edges"] as? [[String: Any]] else { continue }
+                    for edge in edges {
+                        let adjFaces = getIntArray(edge["adjacentFaceIDs"])
+                        if adjFaces.contains(where: { outerWallFaceIDs.contains($0) }) {
+                            capTouchesOuter = true; break capSearch
+                        }
+                    }
+                }
+                if capTouchesOuter { endCapFaceIDs.insert(fid) }
             } else {
                 // Only treat as a feature face if it touches an outer wall face.
                 guard let wires = face["wires"] as? [[String: Any]] else { continue }
@@ -577,7 +592,8 @@ class ModelLoader {
             }
         }
 
-        var partialLoops: [[SIMD3<Float>]] = []
+        var pass1PartialLoops: [[SIMD3<Float>]] = []
+        var pass2PartialLoops: [[SIMD3<Float>]] = []
 
         // ── Pass 1: outer wall face wires ─────────────────────────────────────────
         // Collect Type A edges: edges shared between an outer wall face and any
@@ -617,22 +633,62 @@ class ModelLoader {
                             } else if distance(lastPt, pts.last!) < 1e-3 {
                                 currentWireLoop.append(contentsOf: pts.reversed().dropFirst())
                             } else {
-                                partialLoops.append(currentWireLoop)
+                                pass1PartialLoops.append(currentWireLoop)
                                 currentWireLoop = pts
                             }
                         }
                     }
                 }
                 if !currentWireLoop.isEmpty {
-                    partialLoops.append(currentWireLoop)
+                    pass1PartialLoops.append(currentWireLoop)
+                }
+            }
+        }
+
+        // One-step extension of featureFaceIDs: faces directly adjacent to a primary
+        // feature face (but not outer walls or end caps) are also treated as feature faces
+        // for the purpose of Pass 2 collection.
+        //
+        // WHY: for HSS-O with a deep rectangular notch that penetrates the tube wall, the
+        // inner cylinder is adjacent to the notch side walls (primary feature faces). Its
+        // edge with the complex sever end cap is needed to close the feature loop across
+        // the notch opening, but the inner cylinder is not a primary feature face (it does
+        // not directly touch the outer cylinder).
+        //
+        // One step only (no transitive closure): inner flat walls of hollow HSS are never
+        // adjacent to any primary feature face (separated by wall thickness), so they are
+        // correctly excluded. A full transitive closure would pull in too many faces.
+        var oneStepFeatureFaceIDs = featureFaceIDs
+        for face in facesData {
+            let fid = getInt(face, "faceID")
+            guard !oneStepFeatureFaceIDs.contains(fid),
+                  !outerWallFaceIDs.contains(fid),
+                  !endCapFaceIDs.contains(fid),
+                  let wires = face["wires"] as? [[String: Any]] else { continue }
+            extSearch: for wire in wires {
+                guard let edges = wire["edges"] as? [[String: Any]] else { continue }
+                for edge in edges {
+                    let adj = getIntArray(edge["adjacentFaceIDs"])
+                    if adj.contains(where: { featureFaceIDs.contains($0) }) {
+                        oneStepFeatureFaceIDs.insert(fid); break extSearch
+                    }
                 }
             }
         }
 
         // ── Pass 2: end cap face wires ────────────────────────────────────────────
-        // Collect Type B edges: edges shared between an end-cap face and a feature face.
-        // These form the "interior closure" of a cope/saddle profile where the cut surface
-        // meets the remaining end-cap material below the reach of the cutting pipe.
+        // Collect Type B edges: edges on the OUTER wire of end-cap faces that are
+        // adjacent to a feature face (primary or one-step extended).
+        //
+        // OUTER wire only (isInner=false): for a complex sever end cap (e.g. rectangular
+        // notch cutting through the tube wall), the inner-wall arc that closes the notch
+        // opening is on the outer wire. For a simple annular sever end cap the inner
+        // circle is on the inner wire (isInner=true) and must not be collected.
+        //
+        // oneStepFeatureFaceIDs filter: collects round-tube cylinder arcs (HSS hook) and
+        // inner-cylinder arcs when the notch penetrates the wall (HSS-O deep notch), while
+        // excluding inner flat walls of hollow HSS that are never adjacent to feature faces.
+        //
         // Only run when feature faces are present (harmless for simple sever cuts).
         if !featureFaceIDs.isEmpty {
             for face in facesData {
@@ -641,7 +697,9 @@ class ModelLoader {
                       let wires = face["wires"] as? [[String: Any]] else { continue }
 
                 for wire in wires {
-                    guard let edges = wire["edges"] as? [[String: Any]] else { continue }
+                    // Only process outer wires (isInner == false).
+                    guard let isInnerWire = wire["isInner"] as? Bool, !isInnerWire,
+                          let edges = wire["edges"] as? [[String: Any]] else { continue }
 
                     var currentWireLoop: [SIMD3<Float>] = []
 
@@ -649,8 +707,7 @@ class ModelLoader {
                         let adjFaces = getIntArray(edge["adjacentFaceIDs"])
                         guard let pointsData = edge["points"] as? [[String: Any]], !pointsData.isEmpty else { continue }
 
-                        // Only collect edges shared with a feature face (not outer wall, not end cap).
-                        let touchesFeature = adjFaces.contains { featureFaceIDs.contains($0) }
+                        let touchesFeature = adjFaces.contains { oneStepFeatureFaceIDs.contains($0) }
                         guard touchesFeature else { continue }
 
                         let pts = pointsData.map { SIMD3<Float>(getFloat($0, "x"), getFloat($0, "y"), getFloat($0, "z")) }
@@ -664,30 +721,83 @@ class ModelLoader {
                             } else if distance(lastPt, pts.last!) < 1e-3 {
                                 currentWireLoop.append(contentsOf: pts.reversed().dropFirst())
                             } else {
-                                partialLoops.append(currentWireLoop)
+                                pass2PartialLoops.append(currentWireLoop)
                                 currentWireLoop = pts
                             }
                         }
                     }
                     if !currentWireLoop.isEmpty {
-                        partialLoops.append(currentWireLoop)
+                        pass2PartialLoops.append(currentWireLoop)
                     }
                 }
             }
         }
 
         // =================================================================================
-        // SOTA: MACROSCOPIC FACE STITCHING
-        // We only stitch the massive, pre-assembled wire segments across face boundaries.
+        // TWO-STAGE STITCHING
+        //
+        // Stage 1: stitch Pass 1 (outer-wall) edges alone.
+        //   Any loop that already wraps 360° is a complete sever cut — lock it in and
+        //   do NOT feed it to Stage 2.  This prevents the greedy stitcher from taking an
+        //   inner-wall "shortcut" through a Pass 2 radial edge, which would bypass the
+        //   notch on the outer surface and shatter the endCut into one endCut + two notches.
+        //
+        // Stage 2: stitch the open Pass 1 fragments together with Pass 2 (end-cap) edges.
+        //   Open fragments (partial notch walls, saddle/cope profiles) need the Pass 2
+        //   inner-closure arcs to become closed loops.
         // =================================================================================
-        let tubeLength = Float(stockInfo.length)
-        // Stitch tolerance is set by tessellation density, not tube length.
-        // STEPBridge uses GCPnts_UniformAbscissa at 1 mm spacing, so the maximum gap
-        // between face-boundary wire endpoints from adjacent faces is ≤ 1 mm per side.
-        // 2 mm (2× the discretization step) closes real face-boundary gaps without
-        // accidentally merging endpoints from distinct nearby features.
-        // stitchTolerance rationale: see ModelLoader.stitch(_:tolerance:) doc-comment.
-        let loops = ModelLoader.stitch(partialLoops, tolerance: 2.0)
+        // =================================================================================
+                // TWO-STAGE STITCHING
+                // =================================================================================
+                let tubeLength = Float(stockInfo.length)
+
+                // ── Stage 1: Stitch Outer Boundaries ─────────────────────────────────────────────
+                let pass1Stitched = ModelLoader.stitch(pass1PartialLoops, tolerance: 2.0)
+                var finalLoops3D: [[SIMD3<Float>]] = []
+                var openPass1Loops: [[SIMD3<Float>]] = []
+
+                for loop in pass1Stitched {
+                    // A feature is geometrically closed if its stitched start and end points meet.
+                    // This is infinitely more robust than trying to calculate 3D angular wrap.
+                    if let first = loop.first, let last = loop.last, distance(first, last) < 2.0 {
+                        finalLoops3D.append(loop) // Complete sever cut, hole, or cutout — locked in.
+                    } else {
+                        openPass1Loops.append(loop) // Open fragment — needs Pass 2 to close.
+                    }
+                }
+
+                // ── Stage 2: Resolve Open Features and Discard Ghosts ────────────────────────────
+                if !openPass1Loops.isEmpty {
+                    let pass2Stitched = ModelLoader.stitch(openPass1Loops + pass2PartialLoops, tolerance: 2.0)
+                    
+                    for loop in pass2Stitched {
+                        // Ignore anything that didn't successfully close
+                        guard let first = loop.first, let last = loop.last, distance(first, last) < 2.0 else { continue }
+                        
+                        // CRITICAL FIX: Filter out Pass 2 "ghosts"
+                        // If an endCut was locked in Stage 1, its Pass 2 interior closure edges
+                        // are still floating around in pass2PartialLoops. Stage 2 will stitch them
+                        // into isolated rings on the inside of the tube.
+                        // A valid feature MUST contain at least one point from the Pass 1 outer boundary.
+                        var hasPass1Point = false
+                        checkPass1: for pt in loop {
+                            for openLoop in openPass1Loops {
+                                for openPt in openLoop {
+                                    if distance(pt, openPt) < 1e-3 {
+                                        hasPass1Point = true
+                                        break checkPass1
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if hasPass1Point {
+                            finalLoops3D.append(loop)
+                        }
+                    }
+                }
+
+        
 
         // Map 3D loops to 2D (axial position, angular position) and classify as features.
         var featureId = 1
@@ -697,7 +807,7 @@ class ModelLoader {
         // being misclassified as sever cuts on long tubes.
         let axisTol: Float = 2.0
 
-        for loop3D in loops {
+        for loop3D in finalLoops3D {
             var pathPoints2D: [ToolpathPoint] = []
             var loopMinX = Float.greatestFiniteMagnitude, loopMaxX = -Float.greatestFiniteMagnitude
 
