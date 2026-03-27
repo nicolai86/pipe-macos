@@ -414,14 +414,12 @@ class GCodeGenerator {
     // MARK: - Roll Offset
 
     static func calculateRollOffset(for stock: StockInfo) -> CGFloat {
-        let q1 = alignAxisToX(stock.axis)
-        var rollDeg: CGFloat = 0
-        if stock.profile != .round {
-            let rotatedU = q1.act(normalize(stock.uAxis))
-            let rollAngle = atan2(rotatedU.z, rotatedU.y)
-            rollDeg = CGFloat(-rollAngle * 180.0 / .pi)
-        }
-        return rollDeg
+        // The CAD assembly's global roll orientation should NOT be applied to the G-code.
+                // ModelLoader already normalizes `uAxis` to the major physical dimension,
+                // so local A=0 is strictly bound to the physical stock orientation.
+                // Applying a CAD-derived roll offset causes identical parts in different
+                // assembly orientations to cut on the wrong physical face.
+        return 0
     }
 
     private static func alignAxisToX(_ axis: SIMD3<Float>) -> simd_quatf {
