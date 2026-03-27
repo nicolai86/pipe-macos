@@ -580,8 +580,14 @@ class ModelLoader {
         var partialLoops: [[SIMD3<Float>]] = []
 
         // ── Pass 1: outer wall face wires ─────────────────────────────────────────
-        // Collect Type A edges: edges that are shared between an outer wall face and
-        // any non-outer face (end cap, feature face, or inner wall).
+        // Collect Type A edges: edges shared between an outer wall face and any
+        // non-outer face (end cap, feature face, or inner wall).
+        //
+        // Pass 1 and Pass 2 collect geometrically distinct edge sets:
+        //   Pass 1: outer_wall ↔ end_cap  AND  outer_wall ↔ feature_face
+        //   Pass 2: end_cap ↔ feature_face
+        // These connect at shared topological vertices (where outer_wall, end_cap, and
+        // feature_face all meet), forming the complete boundary without any duplication.
         for face in facesData {
             let faceID = getInt(face, "faceID")
             guard outerWallFaceIDs.contains(faceID),
@@ -737,15 +743,12 @@ class ModelLoader {
                 unwrappedPath.append(ToolpathPoint(x: pathPoints2D[i].x, a: currentA))
             }
 
-            // For sever cuts (startCut/endCut), sort by A so the toolpath is A-monotonic,
-            // then close by appending a point at firstPt.a + 360° to complete the rotation.
-            // Other feature types (holes, notches, cutouts) keep their topological ordering.
-            if type == .startCut || type == .endCut {
-                unwrappedPath.sort { $0.a < $1.a }
-                if let firstPt = unwrappedPath.first {
-                    unwrappedPath.append(ToolpathPoint(x: firstPt.x, a: firstPt.a + 360.0))
-                }
-            }
+            // Sever cuts (startCut/endCut): keep topological traversal order from the stitcher.
+            // Sorting by A here would interleave points from the outer perimeter and the
+            // interior closure at overlapping angular ranges (e.g. a hook-shaped sever),
+            // producing zig-zag X motion. selectPiercePointSever() in ToolpathPlanner
+            // handles reordering to the pierce point, A-continuity re-wrapping, and
+            // appending the closing point — no preprocessing needed here.
 
             let sortedA = unwrappedPath.map { $0.a }.sorted()
             var aCenter = sortedA[sortedA.count / 2]
