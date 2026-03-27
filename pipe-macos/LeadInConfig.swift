@@ -146,6 +146,13 @@ struct LeadInConfig: Codable, Equatable {
     ///
     /// _Typical range:_ 5–15 mm. Default: 8 mm.
     var rotationalSweepMm: Double = 8.0
+    
+    /// NEW: X-axis distance to push the lead-in start point into the scrap zone.
+    /// This turns the pure rotational sweep into a helical sweep, preventing
+    /// collisions with protruding features (like hooks) on the kept part.
+    ///
+    /// _Typical range:_ 0–10 mm. Default: 3 mm.
+    var scrapClearanceXMm: Double = 3.0
 
     // -------------------------------------------------------------------------
     // MARK: Tangent Arc  (strategy == .tangentArc)
@@ -357,6 +364,13 @@ struct LeadOutConfig: Codable, Equatable {
     ///
     /// _Typical range:_ 3–12 mm. Default: 5 mm.
     var rotationalSweepMm: Double = 5.0
+    
+    /// NEW: X-axis distance to push the lead-in start point into the scrap zone.
+    /// This turns the pure rotational sweep into a helical sweep, preventing
+    /// collisions with protruding features (like hooks) on the kept part.
+    ///
+    /// _Typical range:_ 0–10 mm. Default: 3 mm.
+    var scrapClearanceXMm: Double = 3.0
 
     // -------------------------------------------------------------------------
     // MARK: Static Defaults

@@ -506,6 +506,106 @@ class ModelLoader {
             outMinNegV = -maxPosU
 
             outWidth = trueHeight
+        } else if isRound && sideWallCandidates.isEmpty {
+
+            // BUG FIX: Revert to the proven Centroid Shift + Deterministic Geometric Fallbacks.
+            // PCA over-engineered the problem and locked onto arbitrary STEP triangulation noise.
+
+            var centroid = SIMD3<Float>(0, 0, 0)
+            for v in renderVerts {
+                centroid += SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+            }
+            centroid /= Float(renderVerts.count)
+
+            let shift = centroid - trueCenter
+            let radialShift = shift - tubeAxis * dot(shift, tubeAxis)
+
+            // 1. Asymmetric Features (Holes, Single Miters)
+            // Centroid shifts away from missing material. Negating it points A=0 at the feature.
+            if length(radialShift) > 0.5 {  // 0.5mm threshold clears floating point noise
+                outUAxis = normalize(-radialShift)
+
+            } else {
+                // 2. Symmetric Features (Double Miters, Through-Holes)
+                // Centroid shift is 0. We evaluate the physical extremas (the ends of the tube)
+                // to find a rotationally invariant geometric anchor.
+
+                var maxZ: Float = -.greatestFiniteMagnitude
+                var minZ: Float = .greatestFiniteMagnitude
+                for v in renderVerts {
+                    let z = dot(
+                        SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+                            - trueCenter,
+                        tubeAxis
+                    )
+                    if z > maxZ { maxZ = z }
+                    if z < minZ { minZ = z }
+                }
+
+                var topCenter = SIMD3<Float>(0, 0, 0)
+                var topCount: Float = 0
+                var botCenter = SIMD3<Float>(0, 0, 0)
+                var botCount: Float = 0
+                for v in renderVerts {
+                    let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+                    let z = dot(p - trueCenter, tubeAxis)
+                    if z > maxZ - 1.0 {
+                        topCenter += p
+                        topCount += 1
+                    }
+                    if z < minZ + 1.0 {
+                        botCenter += p
+                        botCount += 1
+                    }
+                }
+
+                let topRadial =
+                    (topCount > 0 ? (topCenter / topCount) : trueCenter)
+                    - trueCenter
+                let botRadial =
+                    (botCount > 0 ? (botCenter / botCount) : trueCenter)
+                    - trueCenter
+                let topR = topRadial - tubeAxis * dot(topRadial, tubeAxis)
+                let botR = botRadial - tubeAxis * dot(botRadial, tubeAxis)
+
+                if length(topR) > 1.0 {
+                    // Match the centroid behavior: point at the missing material (the heel of the miter)
+                    outUAxis = normalize(-topR)
+                } else if length(botR) > 1.0 {
+                    outUAxis = normalize(-botR)
+                } else {
+                    // 3. Ultimate Fallback (Perfectly flat, symmetrical tube like a straight pipe)
+                    // Anchor to the first valid mesh vertex. Identical CAD instances preserve
+                    // vertex order, guaranteeing all copies share the exact same local orientation.
+                    for v in renderVerts {
+                        let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+                        let r =
+                            (p - trueCenter) - tubeAxis
+                            * dot(p - trueCenter, tubeAxis)
+                        if length(r) > 1.0 {
+                            outUAxis = normalize(r)
+                            break
+                        }
+                    }
+                }
+            }
+
+            outVAxis = normalize(cross(tubeAxis, outUAxis))
+
+            // Recalculate extrema based on the new deterministic axes
+            outMaxPosU = -.greatestFiniteMagnitude
+            outMinNegU = .greatestFiniteMagnitude
+            outMaxPosV = -.greatestFiniteMagnitude
+            outMinNegV = .greatestFiniteMagnitude
+            for v in renderVerts {
+                let p = SIMD3<Float>(Float(v.x), Float(v.y), Float(v.z))
+                let u = dot(p, outUAxis)
+                let vv = dot(p, outVAxis)
+                outMaxPosU = max(outMaxPosU, u)
+                outMinNegU = min(outMinNegU, u)
+                outMaxPosV = max(outMaxPosV, vv)
+                outMinNegV = min(outMinNegV, vv)
+            }
         }
 
         let profile: StockProfile

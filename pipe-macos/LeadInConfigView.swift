@@ -402,6 +402,14 @@ struct LeadInParamsView: View {
                     range: 2...20, step: 0.5, unit: "mm",
                     help: "A-axis arc length before reaching cut line"
                 )
+                SliderRow(
+                    label: "X-Axis Scrap Clearance",
+                    value: $config.scrapClearanceXMm,
+                    range: 0.0...20.0,
+                    step: 0.5,
+                    unit: "mm",
+                    help: "Pushes the start point away from the part into the scrap zone. Essential for hook cuts."
+                )
             }
 
             if config.strategy == .tangentArc {
@@ -492,6 +500,14 @@ struct LeadOutParamsView: View {
                     label: "Sweep", value: $config.rotationalSweepMm,
                     range: 1...15, step: 0.5, unit: "mm",
                     help: "A-axis arc length past the exit point during torch ramp-down"
+                )
+                SliderRow(
+                    label: "X-Axis Scrap Clearance",
+                    value: $config.scrapClearanceXMm,
+                    range: 0.0...20.0,
+                    step: 0.5,
+                    unit: "mm",
+                    help: "Pushes the start point away from the part into the scrap zone. Essential for hook cuts."
                 )
             }
 
