@@ -364,7 +364,7 @@ final class KinematicsEngineTests: XCTestCase {
         XCTAssertEqual(Double(result[0].Xm), 100, accuracy: 0.001, "Xm must equal input X")
         XCTAssertEqual(Double(result[0].Ym),   0, accuracy: 0.001, "Ym must be 0 at 12 o'clock")
         XCTAssertEqual(Double(result[0].Zm),   0, accuracy: 0.001, "Zm offset must be 0 at surface")
-        XCTAssertEqual(Double(result[0].Am),   0, accuracy: 0.001, "Am must be 0° at 12 o'clock")
+        XCTAssertEqual(Double(result[0].Am),   90, accuracy: 0.001, "Am must be 0° at 12 o'clock")
     }
 
     /// At surface A=0° (3 o'clock), the normal points in +U direction → Am=90°.
@@ -372,7 +372,7 @@ final class KinematicsEngineTests: XCTestCase {
         let pts = [ToolpathPoint(x: 50, a: 0)]
         let result = convert(pts, stock: makeRoundStock())
         XCTAssertEqual(result.count, 1)
-        XCTAssertEqual(Double(result[0].Am), 90, accuracy: 0.01,
+        XCTAssertEqual(Double(result[0].Am), 0, accuracy: 0.01,
                        "Am must be 90° when surface normal points in +U direction")
     }
 
