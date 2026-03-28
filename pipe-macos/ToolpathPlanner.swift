@@ -283,10 +283,12 @@ struct ToolpathPlanner {
 
         var continuousPath = [newPath[0]]
         for i in 1..<newPath.count {
-            var currA = newPath[i].a
-            let prevA = continuousPath.last!.a
-            while currA - prevA > 180.0 { currA -= 360.0 }
-            while currA - prevA < -180.0 { currA += 360.0 }
+            // BUG FIX: Re-stitch internal cuts deterministically
+            let currA = GeodesicUnwrapper.unwrap(
+                previousA: continuousPath.last!.a,
+                currentRawA: newPath[i].a,
+                stock: stock
+            )
             continuousPath.append(ToolpathPoint(x: newPath[i].x, a: currA))
         }
         return continuousPath
@@ -366,17 +368,21 @@ struct ToolpathPlanner {
 
         var newPath: [ToolpathPoint] = [reordered[0]]
         for i in 1..<reordered.count {
-            var current_A = reordered[i].a
-            let prev_A = newPath.last!.a
-            while current_A - prev_A > 180.0 { current_A -= 360.0 }
-            while current_A - prev_A < -180.0 { current_A += 360.0 }
+            // BUG FIX: Re-stitch sever cuts deterministically
+            let current_A = GeodesicUnwrapper.unwrap(
+                previousA: newPath.last!.a,
+                currentRawA: reordered[i].a,
+                stock: stock
+            )
             newPath.append(ToolpathPoint(x: reordered[i].x, a: current_A))
         }
+
         let firstPt = newPath.first!
-        var closeA = firstPt.a
-        let lastA = newPath.last!.a
-        while closeA - lastA > 180.0 { closeA -= 360.0 }
-        while closeA - lastA < -180.0 { closeA += 360.0 }
+        let closeA = GeodesicUnwrapper.unwrap(
+            previousA: newPath.last!.a,
+            currentRawA: firstPt.a,
+            stock: stock
+        )
         newPath.append(ToolpathPoint(x: firstPt.x, a: closeA))
 
         return newPath
@@ -942,5 +948,116 @@ struct ToolpathPlanner {
         }
         if isClosed { offsetPts[offsetPts.count - 1] = offsetPts[0] }
         return offsetPts.map { ToolpathPoint(x: $0.x, a: decode($0.y)) }
+    }
+}
+
+// MARK: - Geodesic Unwrapper
+
+struct GeodesicUnwrapper {
+    /// Deterministically unwraps an A-axis coordinate by measuring true physical surface distance.
+    /// This eliminates the fragile 180° greedy heuristic, preventing accidental
+    /// feature flips on long flat faces (HSS) or during seam crossings.
+    static func unwrap(
+        previousA: CGFloat,
+        currentRawA: CGFloat,
+        stock: StockInfo
+    ) -> CGFloat {
+        // Normalize current A to 0...360
+        var baseA = currentRawA.truncatingRemainder(dividingBy: 360.0)
+        if baseA < 0 { baseA += 360.0 }
+
+        // Align with previous A's wrap tier
+        let tier = round((previousA - baseA) / 360.0) * 360.0
+
+        let candidates = [
+            baseA + tier,
+            baseA + tier - 360.0,
+            baseA + tier + 360.0,
+        ]
+
+        var bestA = candidates[0]
+        var minDistance: CGFloat = .greatestFiniteMagnitude
+
+        for candidate in candidates {
+            let dist = calculateSurfaceDistance(
+                a1: previousA,
+                a2: candidate,
+                stock: stock
+            )
+
+            // 1e-4 tolerance clears floating point noise
+            if dist < minDistance - 1e-4 {
+                minDistance = dist
+                bestA = candidate
+            } else if abs(dist - minDistance) <= 1e-4 {
+                // Tie-breaker: pick the path mathematically closest in angular space
+                if abs(candidate - previousA) < abs(bestA - previousA) {
+                    bestA = candidate
+                }
+            }
+        }
+
+        return bestA
+    }
+
+    /// Computes the true physical surface distance (mm) between two angles.
+    private static func calculateSurfaceDistance(
+        a1: CGFloat,
+        a2: CGFloat,
+        stock: StockInfo
+    ) -> CGFloat {
+        if stock.profile == .round {
+            let radius = (stock.od ?? 50.0) / 2.0
+            return abs(a1 - a2) * (.pi / 180.0) * radius
+        } else {
+            // HSS Profile: Map angles to exact physical perimeter distances
+            let s1 = mapToPerimeter(a: a1, stock: stock)
+            let s2 = mapToPerimeter(a: a2, stock: stock)
+            return abs(s1 - s2)
+        }
+    }
+
+    /// Ray-intersects an angle against the HSS bounding box to find the physical surface walk distance (s).
+    private static func mapToPerimeter(a: CGFloat, stock: StockInfo) -> CGFloat
+    {
+        let W = stock.odX ?? stock.od ?? 50.0
+        let H = stock.odY ?? stock.od ?? 50.0
+        let perimeter = 2.0 * (W + H)
+
+        var normA = a.truncatingRemainder(dividingBy: 360.0)
+        if normA < 0 { normA += 360.0 }
+        let wraps = floor(a / 360.0)
+
+        let rad = normA * .pi / 180.0
+        let cosA = cos(rad)
+        let sinA = sin(rad)
+
+        var x = W / 2.0
+        var y = x * (sinA / cosA)
+
+        // Cap intersection to bounding box edges
+        if abs(y) > H / 2.0 {
+            y = (H / 2.0) * (sinA >= 0 ? 1.0 : -1.0)
+            x = y * (cosA / sinA)
+        } else {
+            x = (W / 2.0) * (cosA >= 0 ? 1.0 : -1.0)
+        }
+
+        var walkDist: CGFloat = 0.0
+
+        // Map 2D coordinate to a flattened 1D perimeter distance
+        if abs(x - W / 2.0) < 1e-4 && y >= 0 {
+            walkDist = y
+        } else if abs(y - H / 2.0) < 1e-4 {
+            walkDist = (H / 2.0) + ((W / 2.0) - x)
+        } else if abs(x - (-W / 2.0)) < 1e-4 {
+            walkDist = (H / 2.0) + W + ((H / 2.0) - y)
+        } else if abs(y - (-H / 2.0)) < 1e-4 {
+            walkDist = 1.5 * H + W + (x - (-W / 2.0))
+        } else {
+            walkDist = perimeter + y
+        }
+
+        return (wraps * perimeter) + walkDist
     }
 }

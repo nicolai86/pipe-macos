@@ -1292,11 +1292,15 @@ class ModelLoader {
             let width = CGFloat(loopMaxX - loopMinX)
 
             var unwrappedPath: [ToolpathPoint] = [pathPoints2D[0]]
+
             for i in 1..<pathPoints2D.count {
-                var currentA = pathPoints2D[i].a
-                let prevA = unwrappedPath.last!.a
-                while currentA - prevA > 180.0 { currentA -= 360.0 }
-                while currentA - prevA < -180.0 { currentA += 360.0 }
+                // BUG FIX: Geodesic unwrapping replaces the greedy 180-degree heuristic
+                let currentA = GeodesicUnwrapper.unwrap(
+                    previousA: unwrappedPath.last!.a,
+                    currentRawA: pathPoints2D[i].a,
+                    stock: stockInfo
+                )
+
                 unwrappedPath.append(
                     ToolpathPoint(x: pathPoints2D[i].x, a: currentA)
                 )
