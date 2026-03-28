@@ -70,7 +70,8 @@ struct ToolpathPlanner {
         stock: StockInfo,
         packStartX: CGFloat,
         rollOffset: CGFloat,
-        previousMachineAm: CGFloat
+        previousMachineAm: CGFloat,
+        previousExitPoint: ToolpathPoint? = nil  // NEW: Track the thermal heat zone
     ) -> PlannedFeature {
         let localPath = feature.rawPath
         guard localPath.count > 1 else {
@@ -124,13 +125,21 @@ struct ToolpathPlanner {
 
         // 4. Pierce point selection + A-continuity wrap
         if isInternal && adjPath.count > 2 {
-            adjPath = selectPiercePointInternal(path: adjPath, k: k)
+            adjPath = selectPiercePointInternal(
+                path: adjPath,
+                k: k,
+                stock: stock,
+                previousExit: previousExitPoint
+            )
         } else if (feature.type == .startCut || feature.type == .endCut)
             && adjPath.count > 1
         {
             adjPath = selectPiercePointSever(
                 path: adjPath,
-                featureType: feature.type
+                featureType: feature.type,
+                k: k,
+                stock: stock,
+                previousExit: previousExitPoint
             )
         }
 
@@ -207,20 +216,62 @@ struct ToolpathPlanner {
 
     // MARK: - Pierce Point Selection
 
-    private func selectPiercePointInternal(path: [ToolpathPoint], k: CGFloat)
-        -> [ToolpathPoint]
-    {
-        var maxLen: CGFloat = -1
+    private func selectPiercePointInternal(
+        path: [ToolpathPoint],
+        k: CGFloat,
+        stock: StockInfo,
+        previousExit: ToolpathPoint?
+    ) -> [ToolpathPoint] {
+        var bestScore: CGFloat = -.greatestFiniteMagnitude
         var bestIdx = 0
+
         for i in 0..<path.count - 1 {
-            let dx = path[i + 1].x - path[i].x
-            let da_mm = (path[i + 1].a - path[i].a) * k
+            let p0 = path[i]
+            let p1 = path[i + 1]
+            let dx = p1.x - p0.x
+            let da_mm = (p1.a - p0.a) * k
             let len = sqrt(dx * dx + da_mm * da_mm)
-            if len > maxLen {
-                maxLen = len
+
+            // 1. BASE SCORE: Segment Length (Favor long, straight edges)
+            var score = len * 1.0
+
+            let midPt = ToolpathPoint(
+                x: (p0.x + p1.x) / 2.0,
+                a: (p0.a + p1.a) / 2.0
+            )
+
+            // 2. CONTEXTUAL SCORING: Thermal & Kinematic Avoidance
+            if let prev = previousExit {
+                let dX_prev = midPt.x - prev.x
+                var dA_prev = abs(
+                    midPt.a.truncatingRemainder(dividingBy: 360.0)
+                        - prev.a.truncatingRemainder(dividingBy: 360.0)
+                )
+                if dA_prev > 180.0 { dA_prev = 360.0 - dA_prev }
+                let dA_mm = dA_prev * k
+
+                let distToPrev = sqrt(dX_prev * dX_prev + dA_mm * dA_mm)
+
+                // Thermal Keepout Zone (10x Kerf Width)
+                if distToPrev < settings.kerfWidth * 10.0 {
+                    score -= 1000.0  // Heavy penalty for piercing in the heat affected zone
+                } else {
+                    score += distToPrev * 0.1  // Reward distance from last cut
+                }
+
+                // Minimal rotation preference (Kinematic efficiency for round stock)
+                if stock.profile == .round {
+                    score -= dA_prev * 0.5
+                }
+            }
+
+            if score > bestScore {
+                bestScore = score
                 bestIdx = i
             }
         }
+
+        // Reorder the path starting from the winning midpoint
         let midPt = ToolpathPoint(
             x: (path[bestIdx].x + path[bestIdx + 1].x) / 2.0,
             a: (path[bestIdx].a + path[bestIdx + 1].a) / 2.0
@@ -243,60 +294,76 @@ struct ToolpathPlanner {
 
     private func selectPiercePointSever(
         path: [ToolpathPoint],
-        featureType: SurfaceFeatureType
+        featureType: SurfaceFeatureType,
+        k: CGFloat,
+        stock: StockInfo,
+        previousExit: ToolpathPoint?
     ) -> [ToolpathPoint] {
-        // Distinguish straight sever cuts (all X ≈ equal) from saddle/cope cuts (X varies with A).
-        // For straight cuts, pick the point on a flat face (nearest 90° multiple) so the torch
-        // pierces a flat surface — same behaviour as before.
-        // For saddle cuts, the "nearest 90°" heuristic often picks the shallowest point of the
-        // saddle (minimal scrap), causing the lead-in to extend off the tube end into air.
-        // Instead, pick the point with the most scrap material behind it so the lead-in is
-        // always within the stock bounds:
-        //   startCut: scrap is at X < cut(A) → pick the A where cut(A) is maximum (deepest)
-        //   endCut:   scrap is at X > cut(A) → pick the A where cut(A) is minimum (deepest)
         let xValues = path.map { $0.x }
         let xRange = (xValues.max() ?? 0) - (xValues.min() ?? 0)
 
+        var bestScore: CGFloat = -.greatestFiniteMagnitude
         var bestIdx = 0
-        if xRange < 5.0 {
-            // Straight sever: find the point nearest to any 90° face
-            var minDiff = CGFloat.greatestFiniteMagnitude
-            for (i, pt) in path.enumerated() {
-                let modA = abs(pt.a.truncatingRemainder(dividingBy: 90.0))
-                let diff = min(modA, 90.0 - modA)
-                if diff < minDiff {
-                    minDiff = diff
-                    bestIdx = i
-                }
-            }
-        } else {
-            // Saddle/cope sever: pick deepest-scrap pierce point
-            if featureType == .startCut {
-                var maxX = -CGFloat.greatestFiniteMagnitude
-                for (i, pt) in path.enumerated() {
-                    if pt.x > maxX {
-                        maxX = pt.x
-                        bestIdx = i
-                    }
+
+        for (i, pt) in path.enumerated() {
+            var score: CGFloat = 0.0
+
+            if xRange < 5.0 {
+                // Straight sever: align to flat face if HSS
+                if stock.profile != .round {
+                    let modA = abs(pt.a.truncatingRemainder(dividingBy: 90.0))
+                    let diff = min(modA, 90.0 - modA)
+                    score -= diff * 1.0  // Penalty for being off the flat face
                 }
             } else {
-                var minX = CGFloat.greatestFiniteMagnitude
-                for (i, pt) in path.enumerated() {
-                    if pt.x < minX {
-                        minX = pt.x
-                        bestIdx = i
-                    }
+                // Saddle/cope sever: pick deepest-scrap pierce point to ensure gravity drop
+                if featureType == .startCut {
+                    score += pt.x * 2.0  // Push as far +X as possible into the scrap
+                } else {
+                    score -= pt.x * 2.0  // Push as far -X as possible into the scrap
                 }
+            }
+
+            // Thermal & Kinematic Avoidance
+            if let prev = previousExit {
+                let dX_prev = pt.x - prev.x
+                var dA_prev = abs(
+                    pt.a.truncatingRemainder(dividingBy: 360.0)
+                        - prev.a.truncatingRemainder(dividingBy: 360.0)
+                )
+                if dA_prev > 180.0 { dA_prev = 360.0 - dA_prev }
+                let dA_mm = dA_prev * k
+
+                let distToPrev = sqrt(dX_prev * dX_prev + dA_mm * dA_mm)
+
+                if distToPrev < settings.kerfWidth * 10.0 {
+                    score -= 1000.0  // Avoid piercing near the previous cut
+                } else {
+                    score += distToPrev * 0.1
+                }
+
+                // Minimal rotation preference
+                if stock.profile == .round || xRange >= 5.0 {
+                    score -= dA_prev * 0.5
+                }
+            }
+
+            if score > bestScore {
+                bestScore = score
+                bestIdx = i
             }
         }
 
         guard bestIdx > 0 else { return path }
+
+        // Reorder path based on the winning vertex
         var corePath = path
         if abs(corePath.last!.a - (corePath.first!.a + 360.0)) < 1.0 {
             corePath.removeLast()
         }
         let reordered =
             Array(corePath[bestIdx...]) + Array(corePath[..<bestIdx])
+
         var newPath: [ToolpathPoint] = [reordered[0]]
         for i in 1..<reordered.count {
             var current_A = reordered[i].a
@@ -311,6 +378,7 @@ struct ToolpathPlanner {
         while closeA - lastA > 180.0 { closeA -= 360.0 }
         while closeA - lastA < -180.0 { closeA += 360.0 }
         newPath.append(ToolpathPoint(x: firstPt.x, a: closeA))
+
         return newPath
     }
 
@@ -421,17 +489,29 @@ struct ToolpathPlanner {
         switch config.strategy {
         case .rotationalArc:
             let (l, c) = buildRotationalArcLeadIn(
-                path: path, k: k, config: config,
-                isScrapLeft: isScrapLeft, featureType: featureType)
+                path: path,
+                k: k,
+                config: config,
+                isScrapLeft: isScrapLeft,
+                featureType: featureType
+            )
             return (l, c, nil)
         case .tangentArc:
             return buildTangentArcLeadIn(
-                path: path, k: k, config: config,
-                isScrapLeft: isScrapLeft, featureType: featureType)
+                path: path,
+                k: k,
+                config: config,
+                isScrapLeft: isScrapLeft,
+                featureType: featureType
+            )
         case .linear:
             let (l, c) = buildLinearLeadIn(
-                path: path, k: k, config: config,
-                isScrapLeft: isScrapLeft, featureType: featureType)
+                path: path,
+                k: k,
+                config: config,
+                isScrapLeft: isScrapLeft,
+                featureType: featureType
+            )
             return (l, c, nil)
         case .centerPierce:
             let (l, c) = buildCenterPierceLeadIn(path: path, config: config)
@@ -470,8 +550,12 @@ struct ToolpathPlanner {
         }
 
         // 2. Calculate Helical Start Position
-        // Push the start point physically away from the cut line into the scrap material
-        let xShift = scrapDirection * CGFloat(config.scrapClearanceXMm)
+        // Push the start point physically away into the scrap material, respecting kerf
+        let safeScrapClearance = max(
+            CGFloat(config.scrapClearanceXMm),
+            settings.kerfWidth * 2.5
+        )
+        let xShift = scrapDirection * safeScrapClearance
         let startX = p0.x + xShift
 
         let steps = 5
@@ -518,13 +602,21 @@ struct ToolpathPlanner {
         }
         let leadR = CGFloat(config.arcRadius)
         let leadTheta = CGFloat(config.arcAngleDeg) * .pi / 180.0
-        let leadL = CGFloat(config.approachLength)
+        // Force the approach length to be at least 2.5x the kerf width
+        let leadL = max(
+            CGFloat(config.approachLength),
+            settings.kerfWidth * 2.5
+        )
         let sideMultiplier: CGFloat = isScrapLeft ? 1.0 : -1.0
 
         guard leadTheta > 0.01 && leadR > 0.01 else {
             let (l, c) = buildLinearLeadIn(
-                path: path, k: k, config: config,
-                isScrapLeft: isScrapLeft, featureType: featureType)
+                path: path,
+                k: k,
+                config: config,
+                isScrapLeft: isScrapLeft,
+                featureType: featureType
+            )
             return (l, c, nil)
         }
 
@@ -556,7 +648,8 @@ struct ToolpathPlanner {
         // Cy is already in s-space (A·k); isCCW = positive sideMultiplier
         // = torch sweeps in the +angle direction = CCW in (X, s) plane.
         let surfaceArc = SurfaceArc(
-            centerX: Cx, centerS: Cy,
+            centerX: Cx,
+            centerS: Cy,
             radius: leadR,
             isCCW: sideMultiplier > 0,
             arcPointCount: arcSteps
@@ -581,7 +674,8 @@ struct ToolpathPlanner {
         featureType: SurfaceFeatureType
     ) -> (leadIn: [ToolpathPoint], cutPath: [ToolpathPoint]) {
         let p0 = path[0]
-        let leadL = CGFloat(config.linearLength)
+        // Force the approach length to be at least 2.5x the kerf width
+        let leadL = max(CGFloat(config.linearLength), settings.kerfWidth * 2.5)
 
         // Sever cuts: approach along the perfect stock surface, axially from the scrap side.
         // startCut → scrap is at X < pierce → approach from X - leadL
